@@ -1,0 +1,5 @@
+*.model filter=lfs diff=lfs merge=lfs -text
+cmudict.rep filter=lfs diff=lfs merge=lfs -text
+*.rep filter=lfs diff=lfs merge=lfs -text
+*.onnx filter=lfs diff=lfs merge=lfs -text
+*.wasm filter=lfs diff=lfs merge=lfs -text

@@ -1,0 +1,6 @@
+node_modules/
+engine/cargo-target/
+*.wav
+!examples/*.wav
+.DS_Store
+.env
