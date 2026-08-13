@@ -1,12 +1,13 @@
-//! TTS frontend WASM engine: normalize + G2P + SPM + BERT align (SIMD).
-//! Acoustic ONNX models stay outside; everything else is embedded here.
+//! TTS frontend WASM engine: normalize + G2P + SPM + BERT align.
+//! Acoustic ONNX models stay outside; frontend assets are embedded here.
 
+mod chinese;
 mod cmudict;
 pub mod g2p;
 mod normalize;
 mod symbols;
 
-use g2p::prepare;
+use g2p::{prepare, prepare_lang};
 use std::alloc::{alloc, dealloc, Layout};
 use std::ptr;
 use std::slice;
@@ -34,33 +35,16 @@ impl Rng64 {
     }
 }
 
-// Embed leftover JSON assets so they live inside engine.wasm
 const _CONFIG_JSON: &[u8] = include_bytes!("../assets/config.json");
 const _DEBERTA_CONFIG_JSON: &[u8] = include_bytes!("../assets/deberta_config.json");
 const _TOKENIZER_CONFIG_JSON: &[u8] = include_bytes!("../assets/tokenizer_config.json");
 
-/// Packed prepare blob (little-endian):
-/// magic u32 = 0x54505331 ("TPS1")
-/// n_ids, n_phones, n_w2p : u32
-/// input_ids[n_ids] i32
-/// phones[n_phones] i32
-/// tones[n_phones] i32
-/// language[n_phones] i32
-/// word2ph[n_w2p] i32
-#[no_mangle]
-pub extern "C" fn engine_prepare(text_ptr: *const u8, text_len: usize, out_len: *mut usize) -> *mut u8 {
-    let text = unsafe {
-        if text_ptr.is_null() {
-            ""
-        } else {
-            std::str::from_utf8(slice::from_raw_parts(text_ptr, text_len)).unwrap_or("")
-        }
-    };
-    let p = prepare(text);
+fn pack_prepare(p: &g2p::Prepared, out_len: *mut usize) -> *mut u8 {
     let mut buf: Vec<u8> = Vec::with_capacity(
-        16 + 4 * (p.input_ids.len()
-            + p.phones.len() * 3
-            + p.word2ph.len()),
+        20 + 4
+            * (p.input_ids.len()
+                + p.phones.len() * 3
+                + p.word2ph.len()),
     );
     fn push_u32(b: &mut Vec<u8>, v: u32) {
         b.extend_from_slice(&v.to_le_bytes());
@@ -70,10 +54,12 @@ pub extern "C" fn engine_prepare(text_ptr: *const u8, text_len: usize, out_len: 
             b.extend_from_slice(&x.to_le_bytes());
         }
     }
+    // magic TPS1, then n_ids, n_phones, n_w2p, bert_lang
     push_u32(&mut buf, 0x5450_5331);
     push_u32(&mut buf, p.input_ids.len() as u32);
     push_u32(&mut buf, p.phones.len() as u32);
     push_u32(&mut buf, p.word2ph.len() as u32);
+    push_u32(&mut buf, p.bert_lang as u32);
     push_i32s(&mut buf, &p.input_ids);
     push_i32s(&mut buf, &p.phones);
     push_i32s(&mut buf, &p.tones);
@@ -95,6 +81,45 @@ pub extern "C" fn engine_prepare(text_ptr: *const u8, text_len: usize, out_len: 
     }
 }
 
+/// Packed prepare blob (little-endian):
+/// magic u32 = 0x54505331 ("TPS1")
+/// n_ids, n_phones, n_w2p, bert_lang : u32
+/// input_ids[n_ids] i32
+/// phones / tones / language [n_phones] i32
+/// word2ph[n_w2p] i32
+///
+/// `lang`: 0=ZH, 1=JP, 2=EN (default EN if using engine_prepare).
+#[no_mangle]
+pub extern "C" fn engine_prepare_lang(
+    text_ptr: *const u8,
+    text_len: usize,
+    lang: u32,
+    out_len: *mut usize,
+) -> *mut u8 {
+    let text = unsafe {
+        if text_ptr.is_null() {
+            ""
+        } else {
+            std::str::from_utf8(slice::from_raw_parts(text_ptr, text_len)).unwrap_or("")
+        }
+    };
+    let p = prepare_lang(text, lang as i32);
+    pack_prepare(&p, out_len)
+}
+
+#[no_mangle]
+pub extern "C" fn engine_prepare(text_ptr: *const u8, text_len: usize, out_len: *mut usize) -> *mut u8 {
+    let text = unsafe {
+        if text_ptr.is_null() {
+            ""
+        } else {
+            std::str::from_utf8(slice::from_raw_parts(text_ptr, text_len)).unwrap_or("")
+        }
+    };
+    let p = prepare(text);
+    pack_prepare(&p, out_len)
+}
+
 #[no_mangle]
 pub extern "C" fn engine_free(ptr: *mut u8, len: usize) {
     if ptr.is_null() || len == 0 {
@@ -105,17 +130,15 @@ pub extern "C" fn engine_free(ptr: *mut u8, len: usize) {
     }
 }
 
-/// Expand Deberta hidden [seq,bert_dim] → en_bert [n_phone,bert_dim] via word2ph,
-/// and allocate zh/ja random U[0,1], emo zeros, zin ~ N(0,1)*sdp_noise.
+/// Expand hidden [seq,bert_dim] → primary bert slot via word2ph;
+/// other language slots get U[0,1]; emo zeros; zin ~ N(0,1)*sdp_noise.
+///
+/// `bert_lang`: 0=zh, 1=ja, 2=en — which slot receives `hidden`.
 ///
 /// Output packed f32 LE:
 /// magic 0x54424E31 ("TBN1")
 /// n_phone u32, bert_dim u32, emo_dim u32
-/// en_bert[n_phone*bert_dim]
-/// zh_bert[n_phone*bert_dim]
-/// ja_bert[n_phone*bert_dim]
-/// emo[emo_dim]
-/// zin[2*n_phone]
+/// en_bert / zh_bert / ja_bert / emo / zin
 #[no_mangle]
 pub extern "C" fn engine_pack_bert(
     hidden_ptr: *const f32,
@@ -128,6 +151,34 @@ pub extern "C" fn engine_pack_bert(
     sdp_noise: f32,
     out_len: *mut usize,
 ) -> *mut u8 {
+    // Default: EN slot (backward compatible with older hosts).
+    engine_pack_bert_lang(
+        hidden_ptr,
+        seq,
+        word2ph_ptr,
+        n_w2p,
+        bert_dim,
+        emo_dim,
+        seed,
+        sdp_noise,
+        2,
+        out_len,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn engine_pack_bert_lang(
+    hidden_ptr: *const f32,
+    seq: usize,
+    word2ph_ptr: *const i32,
+    n_w2p: usize,
+    bert_dim: usize,
+    emo_dim: usize,
+    seed: u32,
+    sdp_noise: f32,
+    bert_lang: u32,
+    out_len: *mut usize,
+) -> *mut u8 {
     if hidden_ptr.is_null() || word2ph_ptr.is_null() || seq == 0 || bert_dim == 0 {
         return ptr::null_mut();
     }
@@ -136,13 +187,13 @@ pub extern "C" fn engine_pack_bert(
     let word2ph = unsafe { slice::from_raw_parts(word2ph_ptr, n_w2p) };
     let n_phone: usize = word2ph.iter().map(|x| *x as usize).sum();
 
-    let mut en = vec![0f32; n_phone * bert_dim];
+    let mut primary = vec![0f32; n_phone * bert_dim];
     let mut o = 0usize;
     for (ti, &reps) in word2ph.iter().enumerate() {
         let src = ti.min(seq.saturating_sub(1));
         let row = &hidden[src * bert_dim..(src + 1) * bert_dim];
         for _ in 0..reps {
-            copy_row_simd(row, &mut en[o * bert_dim..(o + 1) * bert_dim]);
+            primary[o * bert_dim..(o + 1) * bert_dim].copy_from_slice(row);
             o += 1;
         }
     }
@@ -150,8 +201,18 @@ pub extern "C" fn engine_pack_bert(
     let mut rng = Rng64::new(seed);
     let mut zh = vec![0f32; n_phone * bert_dim];
     let mut ja = vec![0f32; n_phone * bert_dim];
-    for v in zh.iter_mut().chain(ja.iter_mut()) {
-        *v = rng.next_f32();
+    let mut en = vec![0f32; n_phone * bert_dim];
+    match bert_lang {
+        0 => zh.copy_from_slice(&primary),
+        1 => ja.copy_from_slice(&primary),
+        _ => en.copy_from_slice(&primary),
+    }
+    for (slot, lang) in [(&mut zh, 0u32), (&mut ja, 1u32), (&mut en, 2u32)] {
+        if lang != bert_lang {
+            for v in slot.iter_mut() {
+                *v = rng.next_f32();
+            }
+        }
     }
     let emo = vec![0f32; emo_dim];
     let mut zin = vec![0f32; 2 * n_phone];
@@ -199,12 +260,6 @@ pub extern "C" fn engine_pack_bert(
     }
 }
 
-#[inline]
-fn copy_row_simd(src: &[f32], dst: &mut [f32]) {
-    dst.copy_from_slice(src);
-}
-
-/// Allocate a float buffer the host can fill (e.g. Deberta output) before pack_bert.
 #[no_mangle]
 pub extern "C" fn engine_alloc_f32(n: usize) -> *mut f32 {
     if n == 0 {
@@ -226,7 +281,6 @@ pub extern "C" fn engine_free_f32(ptr: *mut f32, n: usize) {
     }
 }
 
-/// Allocate bytes for host→wasm string passing.
 #[no_mangle]
 pub extern "C" fn engine_alloc(n: usize) -> *mut u8 {
     if n == 0 {
@@ -245,7 +299,6 @@ pub extern "C" fn engine_alloc_free(ptr: *mut u8, n: usize) {
     }
 }
 
-/// Touch embedded JSON so LTO cannot strip them.
 #[no_mangle]
 pub extern "C" fn engine_assets_bytes() -> u32 {
     (_CONFIG_JSON.len() + _DEBERTA_CONFIG_JSON.len() + _TOKENIZER_CONFIG_JSON.len()) as u32

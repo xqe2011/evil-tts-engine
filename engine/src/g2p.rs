@@ -1,10 +1,14 @@
 //! English G2P using CMUdict (+ punctuation / letter fallback for OOV).
+//! Language routing for ZH/EN (JP stub).
 
+use crate::chinese;
 use crate::cmudict::ENG_DICT;
-use crate::symbols::{post_replace_ph, ARPA, SYMBOL_TO_ID, EN_TONE_START, LANG_EN};
-use sentencepiece_rs::SentencePieceProcessor;
+use crate::symbols::{
+    post_replace_ph, ARPA, EN_TONE_START, LANG_EN, LANG_JP, LANG_ZH, SYMBOL_TO_ID, ZH_TONE_START,
+};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use sentencepiece_rs::SentencePieceProcessor;
 
 const SPM_BYTES: &[u8] = include_bytes!("../assets/spm.model");
 
@@ -55,8 +59,6 @@ fn distribute_phone(n_phone: usize, n_word: usize) -> Vec<i32> {
 }
 
 fn sep_text(text: &str) -> Vec<String> {
-    // Python: re.split(r"([,;.\?\!\s+])", text) — char-class keeps each punct/space as a token.
-    // We keep punctuation tokens; drop whitespace-only pieces.
     let mut out = Vec::new();
     let mut last = 0usize;
     for m in SEP_RE.find_iter(text) {
@@ -70,7 +72,6 @@ fn sep_text(text: &str) -> Vec<String> {
             if matches!(ch, ',' | ';' | '.' | '?' | '!' | '+') {
                 out.push(ch.to_string());
             }
-            // whitespace discarded (Python keeps them then filters strip=="")
         }
         last = m.end();
     }
@@ -80,13 +81,11 @@ fn sep_text(text: &str) -> Vec<String> {
     out.into_iter().filter(|w| !w.trim().is_empty()).collect()
 }
 
-/// Letter-name / punctuation fallback when word missing from CMUdict (no neural g2p_en).
 fn fallback_phones(word: &str) -> (Vec<String>, Vec<i32>) {
     let mut phns = Vec::new();
     let mut tns = Vec::new();
     for ch in word.chars() {
         if ch.is_ascii_alphabetic() {
-            // crude: use single-letter English letter names via dict if present
             let name = ch.to_ascii_uppercase().to_string();
             if let Some(syls) = ENG_DICT.get(&name) {
                 let (p, t) = refine_syllables(syls);
@@ -122,6 +121,13 @@ pub fn encode_bert_ids(text: &str) -> Vec<i32> {
     out
 }
 
+/// Character-level ids for ZH when chinese-roberta ONNX is unavailable:
+/// placeholder length = chars + 2 (CLS/SEP), filled with zeros by host.
+pub fn encode_zh_char_slots(norm: &str) -> Vec<i32> {
+    let n = norm.chars().count() + 2;
+    vec![0i32; n]
+}
+
 pub struct G2pOut {
     pub phones: Vec<String>,
     pub tones: Vec<i32>,
@@ -145,7 +151,6 @@ pub fn g2p_english(text: &str) -> G2pOut {
             phones_w.push(vec![post_replace_ph(word)]);
             tones_w.push(vec![0]);
         } else {
-            // Try ARPA-like from dict of whole word without punctuation
             let cleaned: String = word
                 .chars()
                 .filter(|c| c.is_ascii_alphabetic() || *c == '\'')
@@ -188,14 +193,23 @@ pub fn g2p_english(text: &str) -> G2pOut {
     }
 }
 
-pub fn cleaned_text_to_sequence(phones: &[String], tones: &[i32]) -> (Vec<i32>, Vec<i32>, Vec<i32>) {
+pub fn cleaned_text_to_sequence(
+    phones: &[String],
+    tones: &[i32],
+    lang: i32,
+) -> (Vec<i32>, Vec<i32>, Vec<i32>) {
     let phone_ids: Vec<i32> = phones
         .iter()
         .map(|s| *SYMBOL_TO_ID.get(s.as_str()).unwrap_or(&SYMBOL_TO_ID["UNK"]))
         .collect();
-    let tones: Vec<i32> = tones.iter().map(|t| t + EN_TONE_START).collect();
-    let lang: Vec<i32> = vec![LANG_EN; phone_ids.len()];
-    (phone_ids, tones, lang)
+    let tone_start = match lang {
+        LANG_ZH => ZH_TONE_START,
+        LANG_JP => crate::symbols::JA_TONE_START,
+        _ => EN_TONE_START,
+    };
+    let tones: Vec<i32> = tones.iter().map(|t| t + tone_start).collect();
+    let language: Vec<i32> = vec![lang; phone_ids.len()];
+    (phone_ids, tones, language)
 }
 
 pub fn intersperse(lst: &[i32], item: i32) -> Vec<i32> {
@@ -213,27 +227,72 @@ pub struct Prepared {
     pub tones: Vec<i32>,
     pub language: Vec<i32>,
     pub word2ph: Vec<i32>,
+    /// Which bert slot receives real features: 0=zh, 1=ja, 2=en
+    pub bert_lang: i32,
 }
 
 pub fn prepare(text: &str) -> Prepared {
-    let norm = crate::normalize::text_normalize(text);
-    let g = g2p_english(&norm);
-    let input_ids = encode_bert_ids(&norm);
-    let (phones, tones, language) = cleaned_text_to_sequence(&g.phones, &g.tones);
-    let phones = intersperse(&phones, 0);
-    let tones = intersperse(&tones, 0);
-    let language = intersperse(&language, 0);
-    let mut word2ph: Vec<i32> = g.word2ph.iter().map(|n| n * 2).collect();
-    if !word2ph.is_empty() {
-        word2ph[0] += 1;
-    }
-    assert_eq!(word2ph.iter().sum::<i32>() as usize, phones.len());
-    Prepared {
-        input_ids,
-        phones,
-        tones,
-        language,
-        word2ph,
+    prepare_lang(text, LANG_EN)
+}
+
+pub fn prepare_lang(text: &str, lang: i32) -> Prepared {
+    match lang {
+        LANG_ZH => {
+            let g = chinese::g2p_chinese(text);
+            let input_ids = encode_zh_char_slots(&g.norm_text);
+            let (phones, tones, language) =
+                cleaned_text_to_sequence(&g.phones, &g.tones, LANG_ZH);
+            let phones = intersperse(&phones, 0);
+            let tones = intersperse(&tones, 0);
+            let language = intersperse(&language, 0);
+            let mut word2ph: Vec<i32> = g.word2ph.iter().map(|n| n * 2).collect();
+            if !word2ph.is_empty() {
+                word2ph[0] += 1;
+            }
+            assert_eq!(word2ph.iter().sum::<i32>() as usize, phones.len());
+            Prepared {
+                input_ids,
+                phones,
+                tones,
+                language,
+                word2ph,
+                bert_lang: LANG_ZH,
+            }
+        }
+        LANG_JP => {
+            // OpenJTalk not available in WASM — return empty phones; host must error.
+            Prepared {
+                input_ids: vec![],
+                phones: vec![],
+                tones: vec![],
+                language: vec![],
+                word2ph: vec![],
+                bert_lang: LANG_JP,
+            }
+        }
+        _ => {
+            let norm = crate::normalize::text_normalize(text);
+            let g = g2p_english(&norm);
+            let input_ids = encode_bert_ids(&norm);
+            let (phones, tones, language) =
+                cleaned_text_to_sequence(&g.phones, &g.tones, LANG_EN);
+            let phones = intersperse(&phones, 0);
+            let tones = intersperse(&tones, 0);
+            let language = intersperse(&language, 0);
+            let mut word2ph: Vec<i32> = g.word2ph.iter().map(|n| n * 2).collect();
+            if !word2ph.is_empty() {
+                word2ph[0] += 1;
+            }
+            assert_eq!(word2ph.iter().sum::<i32>() as usize, phones.len());
+            Prepared {
+                input_ids,
+                phones,
+                tones,
+                language,
+                word2ph,
+                bert_lang: LANG_EN,
+            }
+        }
     }
 }
 

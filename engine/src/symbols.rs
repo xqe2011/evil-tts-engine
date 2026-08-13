@@ -5,7 +5,11 @@ use std::collections::{HashMap, HashSet};
 
 pub const NUM_ZH_TONES: i32 = 6;
 pub const NUM_JA_TONES: i32 = 2;
+pub const ZH_TONE_START: i32 = 0;
+pub const JA_TONE_START: i32 = NUM_ZH_TONES; // 6
 pub const EN_TONE_START: i32 = NUM_ZH_TONES + NUM_JA_TONES; // 8
+pub const LANG_ZH: i32 = 0;
+pub const LANG_JP: i32 = 1;
 pub const LANG_EN: i32 = 2;
 
 pub static SYMBOL_TO_ID: Lazy<HashMap<&'static str, i32>> = Lazy::new(|| {
