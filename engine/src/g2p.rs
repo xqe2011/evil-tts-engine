@@ -1,7 +1,8 @@
-//! English G2P using CMUdict (+ punctuation / letter fallback for OOV).
+//! English G2P using CMUdict (+ g2p_en neural OOV fallback).
 //! Language routing for ZH/EN (JP stub).
 
 use crate::chinese;
+use crate::g2p_en;
 use crate::japanese;
 use crate::cmudict::ENG_DICT;
 use crate::symbols::{
@@ -83,24 +84,25 @@ fn sep_text(text: &str) -> Vec<String> {
     out.into_iter().filter(|w| !w.trim().is_empty()).collect()
 }
 
-fn fallback_phones(word: &str) -> (Vec<String>, Vec<i32>) {
+/// OOV path: g2p_en neural predict (mirrors upstream `_g2p(word)` for unknown words).
+fn g2p_en_phones(word: &str) -> (Vec<String>, Vec<i32>) {
+    // Keep hyphens — g2p_en uses them as <unk> graphemes (e.g. "twenty-four").
+    let cleaned: String = word
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic() || *c == '\'' || *c == '-')
+        .collect();
     let mut phns = Vec::new();
     let mut tns = Vec::new();
-    for ch in word.chars() {
-        if ch.is_ascii_alphabetic() {
-            let name = ch.to_ascii_uppercase().to_string();
-            if let Some(syls) = ENG_DICT.get(&name) {
-                let (p, t) = refine_syllables(syls);
-                phns.extend(p);
-                tns.extend(t);
+    if !cleaned.is_empty() {
+        for ph in g2p_en::predict(&cleaned) {
+            if ARPA.contains(ph.as_str()) {
+                let (p, t) = refine_ph(&ph);
+                phns.push(p);
+                tns.push(t);
             } else {
-                phns.push("UNK".into());
+                phns.push(ph);
                 tns.push(0);
             }
-        } else {
-            let s = ch.to_string();
-            phns.push(post_replace_ph(&s));
-            tns.push(0);
         }
     }
     if phns.is_empty() {
@@ -200,12 +202,12 @@ pub fn g2p_english(text: &str) -> G2pOut {
                     phones_w.push(phns.into_iter().map(|p| post_replace_ph(&p)).collect());
                     tones_w.push(tns);
                 } else {
-                    let (phns, tns) = fallback_phones(word);
+                    let (phns, tns) = g2p_en_phones(word);
                     phones_w.push(phns.into_iter().map(|p| post_replace_ph(&p)).collect());
                     tones_w.push(tns);
                 }
             } else {
-                let (phns, tns) = fallback_phones(word);
+                let (phns, tns) = g2p_en_phones(word);
                 phones_w.push(phns.into_iter().map(|p| post_replace_ph(&p)).collect());
                 tones_w.push(tns);
             }

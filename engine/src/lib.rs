@@ -4,8 +4,10 @@
 pub mod chinese;
 pub mod japanese;
 mod cmudict;
+mod g2p_en;
 pub mod g2p;
 mod normalize;
+pub use normalize::text_normalize;
 mod jieba_dict;
 mod pinyin_util;
 mod tone_sandhi;

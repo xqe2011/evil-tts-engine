@@ -151,8 +151,10 @@ fn expand_number(num: u64) -> String {
         if num % 100 == 0 {
             return format!("{} hundred", number_to_words(num / 100));
         }
-        // approx inflect group=2
-        return number_to_words(num);
+        // inflect group=2: e.g. 2024 → "twenty twenty-four", 1999 → "nineteen ninety-nine"
+        let high = num / 100;
+        let low = num % 100;
+        return format!("{} {}", under_100(high), under_100(low));
     }
     number_to_words(num)
 }
