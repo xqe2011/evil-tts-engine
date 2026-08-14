@@ -13,7 +13,7 @@ mod pinyin_util;
 mod tone_sandhi;
 mod symbols;
 
-use g2p::{prepare, prepare_lang};
+use g2p::{prepare, prepare_lang, prepare_multilang, has_lang_tags};
 use std::alloc::{alloc, dealloc, Layout};
 use std::ptr;
 use std::slice;
@@ -47,10 +47,7 @@ const _TOKENIZER_CONFIG_JSON: &[u8] = include_bytes!("../assets/tokenizer_config
 
 fn pack_prepare(p: &g2p::Prepared, out_len: *mut usize) -> *mut u8 {
     let mut buf: Vec<u8> = Vec::with_capacity(
-        20 + 4
-            * (p.input_ids.len()
-                + p.phones.len() * 3
-                + p.word2ph.len()),
+        20 + 4 * (p.input_ids.len() + p.phones.len() * 3 + p.word2ph.len()),
     );
     fn push_u32(b: &mut Vec<u8>, v: u32) {
         b.extend_from_slice(&v.to_le_bytes());
@@ -124,6 +121,79 @@ pub extern "C" fn engine_prepare(text_ptr: *const u8, text_len: usize, out_len: 
     };
     let p = prepare(text);
     pack_prepare(&p, out_len)
+}
+
+/// Multilang packed blob (little-endian):
+/// magic u32 = 0x54505332 ("TPS2")
+/// n_phones, n_segments : u32
+/// phones / tones / language [n_phones] i32
+/// per segment: n_ids, n_w2p, bert_lang : u32; input_ids[n_ids]; word2ph[n_w2p] i32
+#[no_mangle]
+pub extern "C" fn engine_prepare_multilang(
+    text_ptr: *const u8,
+    text_len: usize,
+    skip_start: u32,
+    skip_end: u32,
+    out_len: *mut usize,
+) -> *mut u8 {
+    let text = unsafe {
+        if text_ptr.is_null() {
+            ""
+        } else {
+            std::str::from_utf8(slice::from_raw_parts(text_ptr, text_len)).unwrap_or("")
+        }
+    };
+    let Some(m) = prepare_multilang(text, skip_start != 0, skip_end != 0) else {
+        return ptr::null_mut();
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    fn push_u32(b: &mut Vec<u8>, v: u32) {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    fn push_i32s(b: &mut Vec<u8>, xs: &[i32]) {
+        for x in xs {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    push_u32(&mut buf, 0x5450_5332);
+    push_u32(&mut buf, m.phones.len() as u32);
+    push_u32(&mut buf, m.segments.len() as u32);
+    push_i32s(&mut buf, &m.phones);
+    push_i32s(&mut buf, &m.tones);
+    push_i32s(&mut buf, &m.language);
+    for seg in &m.segments {
+        push_u32(&mut buf, seg.input_ids.len() as u32);
+        push_u32(&mut buf, seg.word2ph.len() as u32);
+        push_u32(&mut buf, seg.bert_lang as u32);
+        push_i32s(&mut buf, &seg.input_ids);
+        push_i32s(&mut buf, &seg.word2ph);
+    }
+    let len = buf.len();
+    unsafe {
+        if !out_len.is_null() {
+            *out_len = len;
+        }
+        let layout = Layout::from_size_align(len, 8).unwrap();
+        let ptr = alloc(layout);
+        if ptr.is_null() {
+            return ptr::null_mut();
+        }
+        ptr::copy_nonoverlapping(buf.as_ptr(), ptr, len);
+        ptr
+    }
+}
+
+/// Return 1 if text contains `[ZH]` / `[EN]` / `[JP]` tags.
+#[no_mangle]
+pub extern "C" fn engine_has_lang_tags(text_ptr: *const u8, text_len: usize) -> u32 {
+    let text = unsafe {
+        if text_ptr.is_null() {
+            ""
+        } else {
+            std::str::from_utf8(slice::from_raw_parts(text_ptr, text_len)).unwrap_or("")
+        }
+    };
+    u32::from(has_lang_tags(text))
 }
 
 #[no_mangle]
@@ -251,6 +321,62 @@ pub extern "C" fn engine_pack_bert_lang(
     push_f32s(&mut buf, &emo);
     push_f32s(&mut buf, &zin);
 
+    let len = buf.len();
+    unsafe {
+        if !out_len.is_null() {
+            *out_len = len;
+        }
+        let layout = Layout::from_size_align(len, 8).unwrap();
+        let ptr = alloc(layout);
+        if ptr.is_null() {
+            return ptr::null_mut();
+        }
+        ptr::copy_nonoverlapping(buf.as_ptr(), ptr, len);
+        ptr
+    }
+}
+
+/// Pack emo (zeros) + zin noise for a merged multilang phone sequence.
+/// Output: magic 0x54454D31 ("TEM1"), emo_dim u32, n_phone u32, emo[emo_dim], zin[2*n_phone]
+#[no_mangle]
+pub extern "C" fn engine_pack_zin_emo(
+    n_phone: u32,
+    emo_dim: u32,
+    seed: u32,
+    sdp_noise: f32,
+    out_len: *mut usize,
+) -> *mut u8 {
+    let n_phone = n_phone as usize;
+    let emo_dim = if emo_dim == 0 { 512 } else { emo_dim as usize };
+    if n_phone == 0 {
+        return ptr::null_mut();
+    }
+    let mut rng = Rng64::new(seed);
+    let emo = vec![0f32; emo_dim];
+    let mut zin = vec![0f32; 2 * n_phone];
+    for c in 0..2 {
+        for t in 0..n_phone {
+            let u1 = rng.next_f32().max(1e-6);
+            let u2 = rng.next_f32();
+            let r = (-2.0 * u1.ln()).sqrt();
+            let th = 2.0 * std::f32::consts::PI * u2;
+            zin[c * n_phone + t] = r * th.cos() * sdp_noise;
+        }
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    fn push_u32(b: &mut Vec<u8>, v: u32) {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    fn push_f32s(b: &mut Vec<u8>, xs: &[f32]) {
+        for x in xs {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    push_u32(&mut buf, 0x5445_4D31);
+    push_u32(&mut buf, emo_dim as u32);
+    push_u32(&mut buf, n_phone as u32);
+    push_f32s(&mut buf, &emo);
+    push_f32s(&mut buf, &zin);
     let len = buf.len();
     unsafe {
         if !out_len.is_null() {

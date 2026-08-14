@@ -282,6 +282,126 @@ pub fn prepare(text: &str) -> Prepared {
     prepare_lang(text, LANG_EN)
 }
 
+static LANG_TAG_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[(ZH|EN|JP)\]").unwrap());
+
+/// Parse `[ZH]…[EN]…[JP]…` tags (upstream markup_language / mix format).
+/// Returns `None` when no language tags are present.
+pub fn parse_lang_tags(text: &str) -> Option<Vec<(i32, String)>> {
+    let mut segments: Vec<(i32, String)> = Vec::new();
+    let mut last_lang: Option<i32> = None;
+    let mut last_end = 0usize;
+
+    for cap in LANG_TAG_RE.captures_iter(text) {
+        let m = cap.get(0).unwrap();
+        if let Some(lang) = last_lang {
+            let content = text[last_end..m.start()].trim();
+            if !content.is_empty() {
+                segments.push((lang, content.to_string()));
+            }
+        }
+        last_lang = Some(match &cap[1] {
+            "ZH" => LANG_ZH,
+            "EN" => LANG_EN,
+            "JP" => LANG_JP,
+            _ => unreachable!(),
+        });
+        last_end = m.end();
+    }
+    if let Some(lang) = last_lang {
+        let content = text[last_end..].trim();
+        if !content.is_empty() {
+            segments.push((lang, content.to_string()));
+        }
+    }
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments)
+    }
+}
+
+pub fn has_lang_tags(text: &str) -> bool {
+    LANG_TAG_RE.is_match(text)
+}
+
+/// Trim leading/trailing blank padding when joining multilang segments (V220 infer_multilang).
+pub fn trim_segment_phones(
+    phones: &mut Vec<i32>,
+    tones: &mut Vec<i32>,
+    language: &mut Vec<i32>,
+    skip_start: bool,
+    skip_end: bool,
+) {
+    if skip_start && phones.len() >= 3 {
+        phones.drain(..3);
+        tones.drain(..3);
+        language.drain(..3);
+    }
+    if skip_end && phones.len() >= 2 {
+        let n = phones.len();
+        phones.truncate(n - 2);
+        tones.truncate(n - 2);
+        language.truncate(n - 2);
+    }
+}
+
+pub struct MultilangSegment {
+    pub input_ids: Vec<i32>,
+    pub word2ph: Vec<i32>,
+    pub bert_lang: i32,
+}
+
+pub struct PreparedMultilang {
+    pub phones: Vec<i32>,
+    pub tones: Vec<i32>,
+    pub language: Vec<i32>,
+    pub segments: Vec<MultilangSegment>,
+}
+
+/// Concatenate per-language prepares with V220 skip_start/skip_end boundary trimming.
+pub fn prepare_multilang(text: &str, skip_start: bool, skip_end: bool) -> Option<PreparedMultilang> {
+    let tagged = parse_lang_tags(text)?;
+    let n = tagged.len();
+    let mut phones_acc: Vec<i32> = Vec::new();
+    let mut tones_acc: Vec<i32> = Vec::new();
+    let mut language_acc: Vec<i32> = Vec::new();
+    let mut segments: Vec<MultilangSegment> = Vec::with_capacity(n);
+
+    for (idx, (lang, seg_text)) in tagged.into_iter().enumerate() {
+        let mut p = prepare_lang(&seg_text, lang);
+        let seg_skip_start = (idx != 0) || (skip_start && idx == 0);
+        let seg_skip_end = (idx != n - 1) || (skip_end && idx == n - 1);
+        trim_segment_phones(
+            &mut p.phones,
+            &mut p.tones,
+            &mut p.language,
+            seg_skip_start,
+            seg_skip_end,
+        );
+        if p.phones.is_empty() {
+            continue;
+        }
+        segments.push(MultilangSegment {
+            input_ids: p.input_ids,
+            word2ph: p.word2ph,
+            bert_lang: p.bert_lang,
+        });
+        phones_acc.extend_from_slice(&p.phones);
+        tones_acc.extend_from_slice(&p.tones);
+        language_acc.extend_from_slice(&p.language);
+    }
+
+    if phones_acc.is_empty() {
+        return None;
+    }
+    Some(PreparedMultilang {
+        phones: phones_acc,
+        tones: tones_acc,
+        language: language_acc,
+        segments,
+    })
+}
+
 pub fn prepare_lang(text: &str, lang: i32) -> Prepared {
     match lang {
         LANG_ZH => {
