@@ -2,6 +2,7 @@
 //! Language routing for ZH/EN (JP stub).
 
 use crate::chinese;
+use crate::japanese;
 use crate::cmudict::ENG_DICT;
 use crate::symbols::{
     post_replace_ph, ARPA, EN_TONE_START, LANG_EN, LANG_JP, LANG_ZH, SYMBOL_TO_ID, ZH_TONE_START,
@@ -216,7 +217,7 @@ pub fn g2p_english(text: &str) -> G2pOut {
     word2ph.push(1);
 
     assert_eq!(phones.len(), tones.len());
-    assert_eq!(phones.len() as i32, word2ph.iter().sum());
+    assert_eq!(phones.len() as i32, word2ph.iter().sum::<i32>());
 
     G2pOut {
         phones,
@@ -292,13 +293,24 @@ pub fn prepare_lang(text: &str, lang: i32) -> Prepared {
             }
         }
         LANG_JP => {
-            // OpenJTalk not available in WASM — return empty phones; host must error.
+            let g = japanese::g2p_japanese(text);
+            let input_ids = japanese::encode_jp_bert_ids(&g.bert_text);
+            let (phones, tones, language) =
+                cleaned_text_to_sequence(&g.phones, &g.tones, LANG_JP);
+            let phones = intersperse(&phones, 0);
+            let tones = intersperse(&tones, 0);
+            let language = intersperse(&language, 0);
+            let mut word2ph: Vec<i32> = g.word2ph.iter().map(|n| n * 2).collect();
+            if !word2ph.is_empty() {
+                word2ph[0] += 1;
+            }
+            assert_eq!(word2ph.iter().sum::<i32>() as usize, phones.len());
             Prepared {
-                input_ids: vec![],
-                phones: vec![],
-                tones: vec![],
-                language: vec![],
-                word2ph: vec![],
+                input_ids,
+                phones,
+                tones,
+                language,
+                word2ph,
                 bert_lang: LANG_JP,
             }
         }

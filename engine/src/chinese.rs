@@ -167,7 +167,7 @@ pub fn g2p_chinese(text: &str) -> ZhG2p {
     word2ph.push(1);
 
     debug_assert_eq!(phones.len(), tones.len());
-    debug_assert_eq!(phones.len() as i32, word2ph.iter().sum());
+    debug_assert_eq!(phones.len() as i32, word2ph.iter().sum::<i32>());
     // Bert-VITS2: len(word2ph) == len(text) + 2
     debug_assert_eq!(word2ph.len(), norm.chars().count() + 2);
 

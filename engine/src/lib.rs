@@ -2,6 +2,7 @@
 //! Acoustic ONNX models stay outside; frontend assets are embedded here.
 
 mod chinese;
+mod japanese;
 mod cmudict;
 pub mod g2p;
 mod normalize;

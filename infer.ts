@@ -7,7 +7,8 @@ import * as ort from "onnxruntime-web/wasm";
  *   bun infer.ts --text "Hello" --out examples/en.wav
  *   bun infer.ts --lang ZH --text "你好，我是助手。" --out examples/zh.wav
  *   bun infer.ts --deberta models/deberta_v3_large_hs.int8.onnx
- *   bun infer.ts --zh-bert models/zh-bert/chinese_roberta_wwm_ext_large_hs.int8.onnx
+ *   bun infer.ts --lang JP --text "こんにちは、世界。" --out examples/jp.wav
+ *   bun infer.ts --jp-bert models/jp-bert/deberta_v2_large_japanese_char_wwm_hs.int8.onnx
  */
 
 const ROOT = import.meta.dir;
@@ -24,6 +25,8 @@ export type InferOptions = {
   deberta: string;
   /** ZH chinese-roberta ONNX (used when lang=ZH). */
   zhBert: string;
+  /** JP deberta-v2-japanese-char ONNX (used when lang=JP). */
+  jpBert: string;
   engine: string;
   config?: string;
   sampleRate: number;
@@ -46,6 +49,7 @@ const DEFAULTS: InferOptions = {
   evil: `${ROOT}/models/evil_v220.onnx`,
   deberta: `${ROOT}/models/deberta_v3_large_hs.int8.onnx`,
   zhBert: `${ROOT}/models/zh-bert/chinese_roberta_wwm_ext_large_hs.int8.onnx`,
+  jpBert: `${ROOT}/models/jp-bert/deberta_v2_large_japanese_char_wwm_hs.int8.onnx`,
   engine: `${ROOT}/engine/engine.wasm`,
   config: `${ROOT}/models/config.json`,
   sampleRate: 44100,
@@ -144,6 +148,9 @@ function parseArgs(argv: string[]): InferOptions {
       case "--zh-bert":
         opt.zhBert = take(i++);
         break;
+      case "--jp-bert":
+        opt.jpBert = take(i++);
+        break;
       case "--engine":
         opt.engine = take(i++);
         break;
@@ -193,6 +200,7 @@ function parseArgs(argv: string[]): InferOptions {
   --evil PATH           acoustic ONNX
   --deberta PATH        EN Deberta ONNX
   --zh-bert PATH        ZH chinese-roberta hidden-states ONNX
+  --jp-bert PATH        JP deberta-v2-japanese-char hidden-states ONNX
   --engine PATH         frontend wasm
   --config PATH         optional config.json (reads data.sampling_rate)
   --sample-rate N --bert-dim N --emo-dim N
@@ -428,6 +436,30 @@ async function runBertHidden(
     return hData.length === need ? hData : hData.slice(0, need);
   }
 
+  if (opt.lang === "JP") {
+    const sess = await ort.InferenceSession.create(await Bun.file(opt.jpBert).arrayBuffer(), {
+      executionProviders: ["wasm"],
+    });
+    const ids = asI64(prep.inputIds);
+    const mask = new BigInt64Array(ids.length);
+    mask.fill(1n);
+    const out = await sess.run({
+      input_ids: new ort.Tensor("int64", ids, [1, ids.length]),
+      attention_mask: new ort.Tensor("int64", mask, [1, mask.length]),
+    });
+    const t = out["hidden"] ?? out["last_hidden_state"] ?? Object.values(out)[0];
+    if (!t) throw new Error("no jp bert hidden");
+    const hData = t.data as Float32Array;
+    const seq = prep.inputIds.length;
+    const need = seq * opt.bertDim;
+    if (hData.length !== need && hData.length !== 1 * need) {
+      throw new Error(
+        `JP BERT hidden length ${hData.length} != seq*bertDim ${need} (seq=${seq} bertDim=${opt.bertDim}).`,
+      );
+    }
+    return hData.length === need ? hData : hData.slice(0, need);
+  }
+
   throw new Error(`BERT path not implemented for lang=${opt.lang}`);
 }
 
@@ -436,9 +468,9 @@ export async function infer(
 ): Promise<{ path: string; samples: number; sampleRate: number }> {
   const opt = await applyConfigFile(optIn);
 
-  if (opt.lang === "JP") {
+  if (opt.lang === "JP" && !(await Bun.file(opt.jpBert).exists())) {
     throw new Error(
-      "JP is not supported in this WASM build (OpenJTalk / Japanese G2P not ported).",
+      `JP deberta-v2-japanese-char ONNX not found: ${opt.jpBert}. Expected models/jp-bert/deberta_v2_large_japanese_char_wwm_hs.int8.onnx`,
     );
   }
   if (opt.lang === "ZH" && !(await Bun.file(opt.zhBert).exists())) {
@@ -508,6 +540,7 @@ async function main() {
         evil: opt.evil,
         deberta: opt.deberta,
         zhBert: opt.zhBert,
+        jpBert: opt.jpBert,
         bertDim: opt.bertDim,
         emoDim: opt.emoDim,
         sid: opt.sid,

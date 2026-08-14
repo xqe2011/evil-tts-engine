@@ -5,15 +5,19 @@ Standalone Bert-VITS2 V220-style TTS frontend (Rust → WASM) + Bun/ORT inferenc
 ## Layout
 
 ```
-engine/          Rust WASM frontend (normalize, EN/ZH G2P, SPM, ZH vocab, bert pack)
+engine/          Rust WASM frontend (normalize, EN/ZH/JP G2P, SPM, vocab, bert pack)
 models/
   evil_v220.onnx
   deberta_v3_large_hs.int8.onnx   # EN BERT. FP32 Deberta not shipped (~1.5GB).
   zh-bert/
     chinese_roberta_wwm_ext_large_hs.int8.onnx  # ZH BERT (hfl/chinese-roberta-wwm-ext-large)
     vocab.txt + tokenizer assets
+  jp-bert/
+    deberta_v2_large_japanese_char_wwm_hs.int8.onnx  # JP BERT (ku-nlp/deberta-v2-large-japanese-char-wwm)
+    vocab.txt + tokenizer assets
   config.json
 infer.ts         Bun CLI: engine.wasm + onnxruntime-web/wasm
+scripts/         ONNX export helpers (JP BERT)
 examples/        sample WAVs
 ```
 
@@ -33,6 +37,9 @@ bun infer.ts --lang EN --text "Hello, I am evil, an assistant by apple banana." 
 
 # Chinese (chinese-roberta int8 → bert_0)
 bun infer.ts --lang ZH --text "你好，我是助手。" --out examples/zh.wav
+
+# Japanese (deberta-v2-japanese-char int8 → bert_1)
+bun infer.ts --lang JP --text "こんにちは、世界！" --out examples/jp.wav
 ```
 
 ## Rebuild frontend WASM
@@ -47,7 +54,7 @@ cd engine && ./build.sh
 |------|-----|---------------|--------|
 | EN   | CMUdict + SPM | `deberta_v3_large_hs.int8.onnx` → `bert_2` | working |
 | ZH   | opencpop + `pinyin` (no jieba ToneSandhi) | `chinese_roberta_wwm_ext_large_hs.int8.onnx` → `bert_0` | working |
-| JP   | OpenJTalk | n/a | **blocked** in WASM — `infer.ts --lang JP` errors on purpose |
+| JP   | jpreprocess + NAIST-JDIC (OpenJTalk-compatible labels) | `deberta_v2_large_japanese_char_wwm_hs.int8.onnx` → `bert_1` | working |
 
 ### ZH notes
 
@@ -56,6 +63,13 @@ cd engine && ./build.sh
 - Engine emits real WordPiece `input_ids` via embedded `zh_vocab.txt` (char-level; aligns with `word2ph`).
 - G2P skips jieba POS / ToneSandhi from upstream Python — pronunciation can differ slightly on sandhi cases.
 
-### JP note
+### JP notes
 
-V220 Japanese G2P depends on **pyopenjtalk**. Porting OpenJTalk dictionaries + frontend into WASM was not done; no partial JP commit.
+- BERT checkpoint matches Bert-VITS2 V220: `ku-nlp/deberta-v2-large-japanese-char-wwm`, ONNX output is `hidden_states[-3]` (1024-d) → acoustic `bert_1`.
+- JP requires that ONNX the same way EN/ZH require their BERT files. Missing the file is an error; there is no zero-BERT fallback.
+- G2P uses [`jpreprocess`](https://github.com/jpreprocess/jpreprocess) with bundled NAIST-JDIC (wasm32-compatible). `engine.wasm` is ~85MB because of the embedded dictionary.
+- Omits upstream `num2words` / alpha-symbol reading expansions; short prompts work well.
+
+### JP note (historical)
+
+Earlier builds blocked `--lang JP` because pyopenjtalk could not compile to WASM. The jpreprocess path replaces that dependency.

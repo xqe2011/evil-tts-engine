@@ -12,6 +12,9 @@ sentencepiece-rs = "0.2"
 once_cell = "1.19"
 regex = "1.11"
 pinyin = "0.10"
+jpreprocess = { version = "0.15", features = ["naist-jdic", "tokenizer"] }
+jlabel = "0.1"
+unicode-normalization = "0.1"
 
 [profile.release]
 opt-level = 3
