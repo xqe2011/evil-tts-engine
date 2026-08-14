@@ -68,7 +68,8 @@ cd engine && ./build.sh
 - BERT checkpoint matches Bert-VITS2 V220: `ku-nlp/deberta-v2-large-japanese-char-wwm`, ONNX output is `hidden_states[-3]` (1024-d) → acoustic `bert_1`.
 - JP requires that ONNX the same way EN/ZH require their BERT files. Missing the file is an error; there is no zero-BERT fallback.
 - G2P uses [`jpreprocess`](https://github.com/jpreprocess/jpreprocess) with bundled NAIST-JDIC (wasm32-compatible). `engine.wasm` is ~85MB because of the embedded dictionary.
-- Omits upstream `num2words` / alpha-symbol reading expansions; short prompts work well.
+- Normalization mirrors upstream V220 `japanese.py`: NFKC, `num2words` (via `num2words2-core`), comma-stripped thousands, currency expansion (`$`→ドル, etc.), then punctuation cleanup before G2P.
+- Alpha/symbol reading map exists but is **not** applied in `text_normalize` (same as upstream — those calls are commented out in Bert-VITS2 V220).
 
 ### JP note (historical)
 

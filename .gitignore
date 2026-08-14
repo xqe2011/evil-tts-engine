@@ -8,3 +8,4 @@ models/jp-bert/pytorch_model.bin
 models/jp-bert/*.onnx.data
 models/jp-bert/deberta_v2_large_japanese_char_wwm_hs.onnx
 models/jp-bert/.cache/
+.venv-ref/

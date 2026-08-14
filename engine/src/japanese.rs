@@ -1,13 +1,18 @@
 //! Bert-VITS2 V220 Japanese G2P (OpenJTalk-compatible via jpreprocess + NAIST-JDIC).
-//! Omits num2words / alpha-symbol expansions from upstream Python.
+//! Normalization mirrors upstream `text/japanese.py` (NFKC, num2words, currency, punctuation).
 
 use crate::symbols::post_replace_ph;
 use jlabel::Label;
 use jpreprocess::kind::JPreprocessDictionaryKind;
 use jpreprocess::{DefaultTokenizer, JPreprocess, SystemDictionaryConfig};
+use num2words2_core::base::Lang;
+use num2words2_core::floatpath::cardinal_from_bigdecimal;
+use num2words2_core::lang_ja::LangJa;
+use num2words2_core::strnum::{python_decimal_parse, ParsedNumber};
+use num_bigint::BigInt;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use unicode_normalization::UnicodeNormalization;
 
 const JP_VOCAB_TXT: &str = include_str!("../assets/jp_vocab.txt");
@@ -37,6 +42,93 @@ static JP_VOCAB: Lazy<HashMap<String, i32>> = Lazy::new(|| {
         m.insert(line.to_string(), i as i32);
     }
     m
+});
+
+static NUM2WORDS_JA: Lazy<LangJa> = Lazy::new(LangJa::default);
+
+static NUMBER_WITH_SEPARATOR_RX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[0-9]{1,3}(,[0-9]{3})+").unwrap());
+static CURRENCY_RX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"([$¥£€])([0-9.]*[0-9])").unwrap());
+static NUMBER_RX: Lazy<Regex> = Lazy::new(|| Regex::new(r"[0-9]+(\.[0-9]+)?").unwrap());
+
+static REP_MAP_KEYS: Lazy<HashSet<char>> = Lazy::new(|| {
+    "：；，。！？\n．…···・・・·・、$“”\"‘’（）()《》【】[]—−～~「」"
+        .chars()
+        .collect()
+});
+static REP_MAP_VALUES: Lazy<HashSet<String>> = Lazy::new(|| {
+    [",", ".", "!", "?", "...", "'", "-"]
+        .into_iter()
+        .map(String::from)
+        .collect()
+});
+
+/// Upstream `_ALPHASYMBOL_YOMI` (used only when explicitly enabled; upstream leaves it commented out in `text_normalize`).
+static ALPHASYMBOL_YOMI: Lazy<HashMap<char, &'static str>> = Lazy::new(|| {
+    HashMap::from([
+        ('#', "シャープ"),
+        ('%', "パーセント"),
+        ('&', "アンド"),
+        ('+', "プラス"),
+        ('-', "マイナス"),
+        (':', "コロン"),
+        (';', "セミコロン"),
+        ('<', "小なり"),
+        ('=', "イコール"),
+        ('>', "大なり"),
+        ('@', "アット"),
+        ('a', "エー"),
+        ('b', "ビー"),
+        ('c', "シー"),
+        ('d', "ディー"),
+        ('e', "イー"),
+        ('f', "エフ"),
+        ('g', "ジー"),
+        ('h', "エイチ"),
+        ('i', "アイ"),
+        ('j', "ジェー"),
+        ('k', "ケー"),
+        ('l', "エル"),
+        ('m', "エム"),
+        ('n', "エヌ"),
+        ('o', "オー"),
+        ('p', "ピー"),
+        ('q', "キュー"),
+        ('r', "アール"),
+        ('s', "エス"),
+        ('t', "ティー"),
+        ('u', "ユー"),
+        ('v', "ブイ"),
+        ('w', "ダブリュー"),
+        ('x', "エックス"),
+        ('y', "ワイ"),
+        ('z', "ゼット"),
+        ('α', "アルファ"),
+        ('β', "ベータ"),
+        ('γ', "ガンマ"),
+        ('δ', "デルタ"),
+        ('ε', "イプシロン"),
+        ('ζ', "ゼータ"),
+        ('η', "イータ"),
+        ('θ', "シータ"),
+        ('ι', "イオタ"),
+        ('κ', "カッパ"),
+        ('λ', "ラムダ"),
+        ('μ', "ミュー"),
+        ('ν', "ニュー"),
+        ('ξ', "クサイ"),
+        ('ο', "オミクロン"),
+        ('π', "パイ"),
+        ('ρ', "ロー"),
+        ('σ', "シグマ"),
+        ('τ', "タウ"),
+        ('υ', "ウプシロン"),
+        ('φ', "ファイ"),
+        ('χ', "カイ"),
+        ('ψ', "プサイ"),
+        ('ω', "オメガ"),
+    ])
 });
 
 #[derive(Debug, Clone)]
@@ -115,36 +207,68 @@ fn replace_punctuation(text: &str) -> String {
     keep
 }
 
-fn an2jp_simple(text: &str) -> String {
-    const DIGITS: &[char] = &['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
-    let mut out = String::new();
-    let mut num = String::new();
-    let flush = |num: &mut String, out: &mut String| {
-        if num.is_empty() {
-            return;
+fn num2words_ja(num_str: &str) -> String {
+    if num_str.contains('.') {
+        match python_decimal_parse(num_str) {
+            Ok(ParsedNumber::Dec(d)) => cardinal_from_bigdecimal(&*NUM2WORDS_JA, &d)
+                .unwrap_or_else(|_| num_str.to_string()),
+            _ => num_str.to_string(),
         }
-        for ch in num.chars() {
-            if let Some(d) = ch.to_digit(10) {
-                out.push(DIGITS[d as usize]);
-            }
-        }
-        num.clear();
-    };
-    for c in text.chars() {
-        if c.is_ascii_digit() {
-            num.push(c);
-        } else {
-            flush(&mut num, &mut out);
-            out.push(c);
-        }
+    } else if let Ok(n) = num_str.parse::<BigInt>() {
+        NUM2WORDS_JA
+            .to_cardinal(&n)
+            .unwrap_or_else(|_| num_str.to_string())
+    } else {
+        num_str.to_string()
     }
-    flush(&mut num, &mut out);
-    out
+}
+
+/// Mirrors upstream `japanese_convert_numbers_to_words`.
+pub fn japanese_convert_numbers_to_words(text: &str) -> String {
+    let mut res = NUMBER_WITH_SEPARATOR_RX
+        .replace_all(text, |caps: &regex::Captures| caps[0].replace(',', ""))
+        .into_owned();
+    res = CURRENCY_RX
+        .replace_all(&res, |caps: &regex::Captures| {
+            let currency = match &caps[1] {
+                "$" => "ドル",
+                "¥" => "円",
+                "£" => "ポンド",
+                "€" => "ユーロ",
+                other => other,
+            };
+            format!("{}{}", &caps[2], currency)
+        })
+        .into_owned();
+    NUMBER_RX
+        .replace_all(&res, |caps: &regex::Captures| num2words_ja(&caps[0]))
+        .into_owned()
+}
+
+/// Mirrors upstream `japanese_convert_alpha_symbols_to_words` (not called from `text_normalize` in V220).
+#[allow(dead_code)]
+pub fn japanese_convert_alpha_symbols_to_words(text: &str) -> String {
+    japanese_convert_alpha_symbols_to_words_impl(text)
+}
+
+fn japanese_convert_alpha_symbols_to_words_impl(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|ch| ALPHASYMBOL_YOMI.get(&ch).map(|s| s.to_string()).unwrap_or_else(|| ch.to_string()))
+        .collect::<Vec<_>>()
+        .concat()
+}
+
+fn is_rep_map_token(word: &str) -> bool {
+    word.chars().count() == 1 && {
+        let ch = word.chars().next().unwrap();
+        REP_MAP_KEYS.contains(&ch) || REP_MAP_VALUES.contains(word)
+    }
 }
 
 pub fn text_normalize(text: &str) -> String {
     let nfkc: String = text.nfkc().collect();
-    let s = an2jp_simple(&nfkc);
+    let s = japanese_convert_numbers_to_words(&nfkc);
     replace_punctuation(&s).replace('゙', "")
 }
 
@@ -177,8 +301,11 @@ fn text2sep_kata(norm: &str) -> (Vec<String>, Vec<String>, Vec<(String, i32)>) {
                         sep.push(w);
                     }
                     continue;
+                } else if !is_rep_map_token(&word) {
+                    yomi = ",".into();
+                } else {
+                    yomi = word.clone();
                 }
-                yomi = word.clone();
             }
             res.push(yomi);
         } else if is_symbol_token(&word) {
@@ -405,5 +532,26 @@ pub fn g2p_japanese(text: &str) -> JpG2p {
         word2ph,
         norm_text: norm,
         bert_text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_numbers_matches_upstream() {
+        assert_eq!(
+            japanese_convert_numbers_to_words("2024年"),
+            format!("{}年", num2words_ja("2024"))
+        );
+        assert_eq!(japanese_convert_numbers_to_words("100円"), "百円");
+        assert_eq!(japanese_convert_numbers_to_words("$100"), "百ドル");
+        assert_eq!(japanese_convert_numbers_to_words("100,000"), num2words_ja("100000"));
+    }
+
+    #[test]
+    fn text_normalize_punctuation() {
+        assert_eq!(text_normalize("こんにちは、世界！"), "こんにちは,世界!");
     }
 }
