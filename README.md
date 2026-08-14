@@ -52,6 +52,7 @@ cd engine && ./build.sh
 ### ZH notes
 
 - BERT checkpoint matches Bert-VITS2: `hfl/chinese-roberta-wwm-ext-large`, ONNX output is `hidden_states[-3]` (1024-d).
+- ZH requires that ONNX the same way EN requires Deberta. Missing the file is an error; there is no zero-BERT fallback.
 - Engine emits real WordPiece `input_ids` via embedded `zh_vocab.txt` (char-level; aligns with `word2ph`).
 - G2P skips jieba POS / ToneSandhi from upstream Python — pronunciation can differ slightly on sandhi cases.
 

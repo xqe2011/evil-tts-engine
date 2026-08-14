@@ -22,8 +22,8 @@ export type InferOptions = {
   evil: string;
   /** EN Deberta ONNX (used when lang=EN). */
   deberta: string;
-  /** ZH chinese-roberta ONNX (hidden-states). If missing, ZH uses zero features. */
-  zhBert?: string;
+  /** ZH chinese-roberta ONNX (used when lang=ZH). */
+  zhBert: string;
   engine: string;
   config?: string;
   sampleRate: number;
@@ -375,11 +375,6 @@ function asI64(xs: ArrayLike<number>) {
   return BigInt64Array.from(xs as ArrayLike<number>, (x) => BigInt(x));
 }
 
-async function fileExists(path: string | undefined): Promise<boolean> {
-  if (!path) return false;
-  return Bun.file(path).exists();
-}
-
 async function runBertHidden(
   opt: InferOptions,
   prep: { inputIds: Int32Array },
@@ -410,13 +405,6 @@ async function runBertHidden(
   }
 
   if (opt.lang === "ZH") {
-    const hasZh = await fileExists(opt.zhBert);
-    if (!hasZh || !opt.zhBert) {
-      console.warn(
-        "[zh] No chinese-roberta ONNX. Using zero ZH bert features. Expected models/zh-bert/chinese_roberta_wwm_ext_large_hs.int8.onnx",
-      );
-      return new Float32Array(prep.inputIds.length * opt.bertDim);
-    }
     const sess = await ort.InferenceSession.create(await Bun.file(opt.zhBert).arrayBuffer(), {
       executionProviders: ["wasm"],
     });
@@ -451,6 +439,11 @@ export async function infer(
   if (opt.lang === "JP") {
     throw new Error(
       "JP is not supported in this WASM build (OpenJTalk / Japanese G2P not ported).",
+    );
+  }
+  if (opt.lang === "ZH" && !(await Bun.file(opt.zhBert).exists())) {
+    throw new Error(
+      `ZH chinese-roberta ONNX not found: ${opt.zhBert}. Expected models/zh-bert/chinese_roberta_wwm_ext_large_hs.int8.onnx`,
     );
   }
 
