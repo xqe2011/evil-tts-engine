@@ -9,10 +9,11 @@ import * as ort from "onnxruntime-web/wasm";
  *   bun infer.ts --deberta models/deberta_v3_large_hs.int8.onnx
  *   bun infer.ts --lang JP --text "こんにちは、世界。" --out examples/jp.wav
  *   bun infer.ts --text "[ZH]你好[EN]hello[JP]こんにちは" --out examples/multilang.wav
- *   bun infer.ts --jp-bert models/jp-bert/deberta_v2_large_japanese_char_wwm_hs.int8.onnx
+ *   bun infer.ts --jp-bert models/deberta_v2_large_japanese_char_wwm_hs.int8.onnx
  */
 
 const ROOT = import.meta.dir;
+const SAMPLE_RATE = 44100;
 
 /** 0=ZH, 1=JP, 2=EN — matches Bert-VITS2 V220 language_id_map */
 export type LangCode = "ZH" | "JP" | "EN";
@@ -29,8 +30,6 @@ export type InferOptions = {
   /** JP deberta-v2-japanese-char ONNX (used when lang=JP). */
   jpBert: string;
   engine: string;
-  config?: string;
-  sampleRate: number;
   bertDim: number;
   emoDim: number;
   sid: number;
@@ -55,11 +54,9 @@ const DEFAULTS: InferOptions = {
   lang: "EN",
   evil: `${ROOT}/models/evil_v220.onnx`,
   deberta: `${ROOT}/models/deberta_v3_large_hs.int8.onnx`,
-  zhBert: `${ROOT}/models/zh-bert/chinese_roberta_wwm_ext_large_hs.int8.onnx`,
-  jpBert: `${ROOT}/models/jp-bert/deberta_v2_large_japanese_char_wwm_hs.int8.onnx`,
+  zhBert: `${ROOT}/models/chinese_roberta_wwm_ext_large_hs.int8.onnx`,
+  jpBert: `${ROOT}/models/deberta_v2_large_japanese_char_wwm_hs.int8.onnx`,
   engine: `${ROOT}/engine/engine.wasm`,
-  config: `${ROOT}/models/config.json`,
-  sampleRate: 44100,
   bertDim: 1024,
   emoDim: 512,
   sid: 0,
@@ -176,13 +173,6 @@ function parseArgs(argv: string[]): InferOptions {
       case "--engine":
         opt.engine = take(i++);
         break;
-      case "--config":
-        opt.config = take(i++);
-        break;
-      case "--sample-rate":
-      case "--sr":
-        opt.sampleRate = Number(take(i++));
-        break;
       case "--bert-dim":
         opt.bertDim = Number(take(i++));
         break;
@@ -236,8 +226,7 @@ function parseArgs(argv: string[]): InferOptions {
   --zh-bert PATH        ZH chinese-roberta hidden-states ONNX
   --jp-bert PATH        JP deberta-v2-japanese-char hidden-states ONNX
   --engine PATH         frontend wasm
-  --config PATH         optional config.json (reads data.sampling_rate)
-  --sample-rate N --bert-dim N --emo-dim N
+  --bert-dim N --emo-dim N
   --sid N --seed N
   --length-scale F --sdp-ratio F --noise-scale F --sdp-noise-scale F`);
         process.exit(0);
@@ -249,21 +238,6 @@ function parseArgs(argv: string[]): InferOptions {
     }
   }
   return opt;
-}
-
-async function applyConfigFile(opt: InferOptions): Promise<InferOptions> {
-  if (!opt.config) return opt;
-  const raw = await Bun.file(opt.config).text();
-  const cfg = JSON.parse(raw) as {
-    data?: { sampling_rate?: number; spk2id?: Record<string, number> };
-  };
-  const next = { ...opt };
-  const argv = process.argv.slice(2);
-  const srFlag = argv.includes("--sample-rate") || argv.includes("--sr");
-  if (!srFlag && cfg.data?.sampling_rate) {
-    next.sampleRate = cfg.data.sampling_rate;
-  }
-  return next;
 }
 
 async function loadEngine(path: string): Promise<EngineExports> {
@@ -709,7 +683,7 @@ async function inferMultilang(
 export async function infer(
   optIn: InferOptions,
 ): Promise<{ path: string; samples: number; sampleRate: number; multilang: boolean }> {
-  const opt = await applyConfigFile(optIn);
+  const opt = optIn;
 
   ort.env.wasm.numThreads = 1;
   ort.env.wasm.simd = true;
@@ -730,12 +704,12 @@ export async function infer(
   } else {
     if (opt.lang === "JP" && !(await Bun.file(opt.jpBert).exists())) {
       throw new Error(
-        `JP deberta-v2-japanese-char ONNX not found: ${opt.jpBert}. Expected models/jp-bert/deberta_v2_large_japanese_char_wwm_hs.int8.onnx`,
+        `JP deberta-v2-japanese-char ONNX not found: ${opt.jpBert}. Expected models/deberta_v2_large_japanese_char_wwm_hs.int8.onnx`,
       );
     }
     if (opt.lang === "ZH" && !(await Bun.file(opt.zhBert).exists())) {
       throw new Error(
-        `ZH chinese-roberta ONNX not found: ${opt.zhBert}. Expected models/zh-bert/chinese_roberta_wwm_ext_large_hs.int8.onnx`,
+        `ZH chinese-roberta ONNX not found: ${opt.zhBert}. Expected models/chinese_roberta_wwm_ext_large_hs.int8.onnx`,
       );
     }
   }
@@ -796,8 +770,8 @@ export async function infer(
   const o = audioOut[outName] ?? Object.values(audioOut)[0];
   if (!o) throw new Error("no acoustic output");
   const wav = o.data as Float32Array;
-  await writeWav(opt.out, wav, opt.sampleRate);
-  return { path: opt.out, samples: wav.length, sampleRate: opt.sampleRate, multilang: useMultilang };
+  await writeWav(opt.out, wav, SAMPLE_RATE);
+  return { path: opt.out, samples: wav.length, sampleRate: SAMPLE_RATE, multilang: useMultilang };
 }
 
 async function main() {

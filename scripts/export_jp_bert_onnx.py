@@ -29,14 +29,13 @@ def main() -> None:
     ap.add_argument(
         "--model-dir",
         type=Path,
-        default=Path(__file__).resolve().parents[1] / "models" / "jp-bert",
+        help="HF model dir with config + weights (default: download ku-nlp/deberta-v2-large-japanese-char-wwm)",
     )
     ap.add_argument(
         "--out-fp32",
         type=Path,
         default=Path(__file__).resolve().parents[1]
         / "models"
-        / "jp-bert"
         / "deberta_v2_large_japanese_char_wwm_hs.onnx",
     )
     ap.add_argument(
@@ -44,13 +43,18 @@ def main() -> None:
         type=Path,
         default=Path(__file__).resolve().parents[1]
         / "models"
-        / "jp-bert"
         / "deberta_v2_large_japanese_char_wwm_hs.int8.onnx",
     )
     ap.add_argument("--skip-int8", action="store_true")
     args = ap.parse_args()
 
     model_dir = args.model_dir
+    if model_dir is None:
+        from huggingface_hub import snapshot_download
+
+        model_dir = Path(
+            snapshot_download("ku-nlp/deberta-v2-large-japanese-char-wwm")
+        )
     tok = AutoTokenizer.from_pretrained(str(model_dir))
     base = AutoModelForMaskedLM.from_pretrained(str(model_dir))
     base.eval()

@@ -7,15 +7,10 @@ Standalone Bert-VITS2 V220-style TTS frontend (Rust → WASM) + Bun/ORT inferenc
 ```
 engine/          Rust WASM frontend (normalize, EN/ZH/JP G2P, SPM, vocab, bert pack)
 models/
-  evil_v220.onnx
-  deberta_v3_large_hs.int8.onnx   # EN BERT. FP32 Deberta not shipped (~1.5GB).
-  zh-bert/
-    chinese_roberta_wwm_ext_large_hs.int8.onnx  # ZH BERT (hfl/chinese-roberta-wwm-ext-large)
-    vocab.txt + tokenizer assets
-  jp-bert/
-    deberta_v2_large_japanese_char_wwm_hs.int8.onnx  # JP BERT (ku-nlp/deberta-v2-large-japanese-char-wwm)
-    vocab.txt + tokenizer assets
-  config.json
+  evil_v220.onnx                              # acoustic (evil, 44.1 kHz)
+  deberta_v3_large_hs.int8.onnx               # EN BERT → bert_2
+  chinese_roberta_wwm_ext_large_hs.int8.onnx  # ZH BERT → bert_0
+  deberta_v2_large_japanese_char_wwm_hs.int8.onnx  # JP BERT → bert_1
 infer.ts         Bun CLI: engine.wasm + onnxruntime-web/wasm
 scripts/         ONNX export helpers (JP BERT)
 examples/        sample WAVs
