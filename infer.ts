@@ -9,7 +9,8 @@ import * as ort from "onnxruntime-web/wasm";
  *   bun infer.ts --deberta models/deberta_v3_large_hs.int8.onnx
  *   bun infer.ts --lang JP --text "こんにちは、世界。" --out examples/jp.wav
  *   bun infer.ts --text "[ZH]你好[EN]hello[JP]こんにちは" --out examples/multilang.wav
- *   bun infer.ts --jp-bert models/deberta_v2_large_japanese_char_wwm_hs.int8.onnx
+ *   bun infer.ts --lang zh,en --text "[ZH]你好[EN]hello[JP]こんにちは" --out /tmp/zh-en.wav
+ *   bun infer.ts --fp16 --lang EN --text "Hello" --out examples/en-fp16.wav
  */
 
 const ROOT = import.meta.dir;
@@ -21,7 +22,10 @@ export type LangCode = "ZH" | "JP" | "EN";
 export type InferOptions = {
   text: string;
   out: string;
+  /** G2P language for untagged text (first of `langs`). */
   lang: LangCode;
+  /** BERT allow-list. Tagged segments outside this list are skipped. */
+  langs: LangCode[];
   evil: string;
   /** EN Deberta ONNX (used when lang=EN). */
   deberta: string;
@@ -30,6 +34,8 @@ export type InferOptions = {
   /** JP deberta-v2-japanese-char ONNX (used when lang=JP). */
   jpBert: string;
   engine: string;
+  /** Use models/*.fp16.onnx for BERT. Acoustic is always evil_v220.onnx. */
+  fp16?: boolean;
   bertDim: number;
   emoDim: number;
   sid: number;
@@ -52,6 +58,7 @@ const DEFAULTS: InferOptions = {
   text: "Hello, I am evil, an assistant by apple banana.",
   out: `${ROOT}/examples/en.wav`,
   lang: "EN",
+  langs: ["ZH", "JP", "EN"],
   evil: `${ROOT}/models/evil_v220.onnx`,
   deberta: `${ROOT}/models/deberta_v3_large_hs.int8.onnx`,
   zhBert: `${ROOT}/models/chinese_roberta_wwm_ext_large_hs.int8.onnx`,
@@ -153,9 +160,9 @@ function parseArgs(argv: string[]): InferOptions {
         opt.out = take(i++);
         break;
       case "--lang": {
-        const v = take(i++).toUpperCase();
-        if (v !== "ZH" && v !== "JP" && v !== "EN") throw new Error(`--lang must be ZH|JP|EN`);
-        opt.lang = v;
+        const list = parseLangList(take(i++));
+        opt.langs = list;
+        opt.lang = list[0]!;
         break;
       }
       case "--evil":
@@ -172,6 +179,12 @@ function parseArgs(argv: string[]): InferOptions {
         break;
       case "--engine":
         opt.engine = take(i++);
+        break;
+      case "--fp16":
+        opt.fp16 = true;
+        opt.deberta = `${ROOT}/models/deberta_v3_large_hs.fp16.onnx`;
+        opt.zhBert = `${ROOT}/models/chinese_roberta_wwm_ext_large_hs.fp16.onnx`;
+        opt.jpBert = `${ROOT}/models/deberta_v2_large_japanese_char_wwm_hs.fp16.onnx`;
         break;
       case "--bert-dim":
         opt.bertDim = Number(take(i++));
@@ -217,7 +230,9 @@ function parseArgs(argv: string[]): InferOptions {
         console.log(`Usage: bun infer.ts [options]
   --text STR
   --out PATH
-  --lang ZH|JP|EN       default EN (monolingual); ignored when text has [ZH]/[EN]/[JP] tags
+  --lang ZH|JP|EN       untagged G2P lang; also BERT allow-list
+                        comma/[list] ok: zh,en  or  [zh,en,jp]
+                        default allow-list ZH,JP,EN (untagged still EN)
   --multilang           force multilang path
   --skip-start          trim leading blanks on first segment (V220 infer_multilang)
   --skip-end            trim trailing blanks on last segment
@@ -226,6 +241,7 @@ function parseArgs(argv: string[]): InferOptions {
   --zh-bert PATH        ZH chinese-roberta hidden-states ONNX
   --jp-bert PATH        JP deberta-v2-japanese-char hidden-states ONNX
   --engine PATH         frontend wasm
+  --fp16                use models/*.fp16.onnx for EN/ZH/JP BERT (acoustic stays FP32)
   --bert-dim N --emo-dim N
   --sid N --seed N
   --length-scale F --sdp-ratio F --noise-scale F --sdp-noise-scale F`);
@@ -238,6 +254,110 @@ function parseArgs(argv: string[]): InferOptions {
     }
   }
   return opt;
+}
+
+function parseLangCode(raw: string): LangCode {
+  const v = raw.trim().toUpperCase();
+  if (v === "ZH" || v === "JP" || v === "EN") return v;
+  throw new Error(`unknown lang ${raw} (want ZH|JP|EN)`);
+}
+
+/** `EN` / `zh,en` / `[zh, en, jp]` */
+function parseLangList(raw: string): LangCode[] {
+  const parts = raw
+    .replace(/[\[\]\s]/g, "")
+    .split(/[,+|]+/)
+    .filter(Boolean);
+  if (parts.length === 0) throw new Error("--lang needs at least one of ZH|JP|EN");
+  const out: LangCode[] = [];
+  for (const p of parts) {
+    const lang = parseLangCode(p);
+    if (!out.includes(lang)) out.push(lang);
+  }
+  return out;
+}
+
+type TaggedSeg = { lang: LangCode; text: string };
+
+function parseLangTags(text: string): TaggedSeg[] | null {
+  const re = /\[(ZH|EN|JP)\]/gi;
+  const segs: TaggedSeg[] = [];
+  let lastLang: LangCode | undefined;
+  let lastEnd = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    if (lastLang) {
+      const content = text.slice(lastEnd, m.index).trim();
+      if (content) segs.push({ lang: lastLang, text: content });
+    }
+    lastLang = parseLangCode(m[1]!);
+    lastEnd = m.index + m[0].length;
+  }
+  if (lastLang) {
+    const content = text.slice(lastEnd).trim();
+    if (content) segs.push({ lang: lastLang, text: content });
+  }
+  return segs.length ? segs : null;
+}
+
+function filterTaggedText(
+  text: string,
+  enabled: ReadonlySet<LangCode>,
+): { text: string; skipped: TaggedSeg[] } {
+  const segs = parseLangTags(text);
+  if (!segs) return { text, skipped: [] };
+  const kept: TaggedSeg[] = [];
+  const skipped: TaggedSeg[] = [];
+  for (const s of segs) {
+    if (enabled.has(s.lang)) kept.push(s);
+    else skipped.push(s);
+  }
+  for (const s of skipped) {
+    console.error(`skip unsupported lang ${s.lang} (not in --lang ${[...enabled].join(",")}): ${s.text}`);
+  }
+  return {
+    text: kept.map((s) => `[${s.lang}]${s.text}`).join(""),
+    skipped,
+  };
+}
+
+function bertPath(opt: InferOptions, lang: LangCode): string {
+  if (lang === "EN") return opt.deberta;
+  if (lang === "ZH") return opt.zhBert;
+  return opt.jpBert;
+}
+
+type BertLoader = {
+  get(lang: LangCode): Promise<ort.InferenceSession>;
+  release(): Promise<void>;
+};
+
+function createBertLoader(opt: InferOptions, enabled: ReadonlySet<LangCode>): BertLoader {
+  const cache = new Map<LangCode, ort.InferenceSession>();
+  return {
+    async get(lang) {
+      if (!enabled.has(lang)) {
+        throw new Error(`lang ${lang} is not in --lang allow-list`);
+      }
+      const hit = cache.get(lang);
+      if (hit) return hit;
+      const path = bertPath(opt, lang);
+      if (!(await Bun.file(path).exists())) {
+        throw new Error(`${lang} BERT ONNX not found: ${path}`);
+      }
+      const sess = await ort.InferenceSession.create(await Bun.file(path).arrayBuffer(), {
+        executionProviders: ["wasm"],
+      });
+      cache.set(lang, sess);
+      return sess;
+    },
+    async release() {
+      for (const sess of cache.values()) {
+        await sess.release();
+      }
+      cache.clear();
+    },
+  };
 }
 
 async function loadEngine(path: string): Promise<EngineExports> {
@@ -547,86 +667,34 @@ async function runBertHidden(
   opt: InferOptions,
   prep: { inputIds: Int32Array },
   lang: LangCode,
+  berts: BertLoader,
 ): Promise<Float32Array> {
-  if (lang === "EN") {
-    const deberta = await ort.InferenceSession.create(await Bun.file(opt.deberta).arrayBuffer(), {
-      executionProviders: ["wasm"],
-    });
-    const ids = asI64(prep.inputIds);
-    const mask = new BigInt64Array(ids.length);
-    mask.fill(1n);
-    const bertOut = await deberta.run({
-      input_ids: new ort.Tensor("int64", ids, [1, ids.length]),
-      attention_mask: new ort.Tensor("int64", mask, [1, mask.length]),
-    });
-    const hiddenName = opt.debertaOutput ?? "hidden";
-    const hiddenTensor = bertOut[hiddenName] ?? Object.values(bertOut)[0];
-    if (!hiddenTensor) throw new Error("no deberta hidden output");
-    const hData = hiddenTensor.data as Float32Array;
-    const seq = prep.inputIds.length;
-    const need = seq * opt.bertDim;
-    if (hData.length !== need && hData.length !== 1 * need) {
-      throw new Error(
-        `Deberta hidden length ${hData.length} != seq*bertDim ${need} (seq=${seq} bertDim=${opt.bertDim}).`,
-      );
-    }
-    return hData.length === need ? hData : hData.slice(0, need);
+  const sess = await berts.get(lang);
+  const ids = asI64(prep.inputIds);
+  const mask = new BigInt64Array(ids.length);
+  mask.fill(1n);
+  const out = await sess.run({
+    input_ids: new ort.Tensor("int64", ids, [1, ids.length]),
+    attention_mask: new ort.Tensor("int64", mask, [1, mask.length]),
+  });
+  const hiddenName = lang === "EN" ? (opt.debertaOutput ?? "hidden") : "hidden";
+  const hiddenTensor = out[hiddenName] ?? out["last_hidden_state"] ?? Object.values(out)[0];
+  if (!hiddenTensor) throw new Error(`no ${lang} bert hidden output`);
+  const hData = hiddenTensor.data as Float32Array;
+  const seq = prep.inputIds.length;
+  const need = seq * opt.bertDim;
+  if (hData.length !== need && hData.length !== 1 * need) {
+    throw new Error(
+      `${lang} BERT hidden length ${hData.length} != seq*bertDim ${need} (seq=${seq} bertDim=${opt.bertDim}).`,
+    );
   }
-
-  if (lang === "ZH") {
-    const sess = await ort.InferenceSession.create(await Bun.file(opt.zhBert).arrayBuffer(), {
-      executionProviders: ["wasm"],
-    });
-    const ids = asI64(prep.inputIds);
-    const mask = new BigInt64Array(ids.length);
-    mask.fill(1n);
-    const out = await sess.run({
-      input_ids: new ort.Tensor("int64", ids, [1, ids.length]),
-      attention_mask: new ort.Tensor("int64", mask, [1, mask.length]),
-    });
-    const t = out["hidden"] ?? out["last_hidden_state"] ?? Object.values(out)[0];
-    if (!t) throw new Error("no zh bert hidden");
-    const hData = t.data as Float32Array;
-    const seq = prep.inputIds.length;
-    const need = seq * opt.bertDim;
-    if (hData.length !== need && hData.length !== 1 * need) {
-      throw new Error(
-        `ZH BERT hidden length ${hData.length} != seq*bertDim ${need} (seq=${seq} bertDim=${opt.bertDim}).`,
-      );
-    }
-    return hData.length === need ? hData : hData.slice(0, need);
-  }
-
-  if (lang === "JP") {
-    const sess = await ort.InferenceSession.create(await Bun.file(opt.jpBert).arrayBuffer(), {
-      executionProviders: ["wasm"],
-    });
-    const ids = asI64(prep.inputIds);
-    const mask = new BigInt64Array(ids.length);
-    mask.fill(1n);
-    const out = await sess.run({
-      input_ids: new ort.Tensor("int64", ids, [1, ids.length]),
-      attention_mask: new ort.Tensor("int64", mask, [1, mask.length]),
-    });
-    const t = out["hidden"] ?? out["last_hidden_state"] ?? Object.values(out)[0];
-    if (!t) throw new Error("no jp bert hidden");
-    const hData = t.data as Float32Array;
-    const seq = prep.inputIds.length;
-    const need = seq * opt.bertDim;
-    if (hData.length !== need && hData.length !== 1 * need) {
-      throw new Error(
-        `JP BERT hidden length ${hData.length} != seq*bertDim ${need} (seq=${seq} bertDim=${opt.bertDim}).`,
-      );
-    }
-    return hData.length === need ? hData : hData.slice(0, need);
-  }
-
-  throw new Error(`BERT path not implemented for lang=${lang}`);
+  return hData.length === need ? hData : hData.slice(0, need);
 }
 
 async function inferMultilang(
   opt: InferOptions,
   engine: EngineExports,
+  berts: BertLoader,
 ): Promise<{ phones: Int32Array; tones: Int32Array; language: Int32Array; packed: {
   nPhone: number; bertDim: number; emoDim: number; en: Float32Array; zh: Float32Array; ja: Float32Array; emo: Float32Array; zin: Float32Array;
 } }> {
@@ -643,7 +711,7 @@ async function inferMultilang(
     const lang = LANG_BY_ID[seg.bertLang] ?? "EN";
     const segSkipStart = idx !== 0 || (skipStart && idx === 0);
     const segSkipEnd = idx !== nSeg - 1 || (skipEnd && idx === nSeg - 1);
-    const hData = await runBertHidden(opt, seg, lang);
+    const hData = await runBertHidden(opt, seg, lang, berts);
     const packed = packBert(
       engine,
       hData,
@@ -683,97 +751,95 @@ async function inferMultilang(
 export async function infer(
   optIn: InferOptions,
 ): Promise<{ path: string; samples: number; sampleRate: number; multilang: boolean }> {
-  const opt = optIn;
+  const opt = { ...optIn };
+  const enabled = new Set(opt.langs);
 
   ort.env.wasm.numThreads = 1;
   ort.env.wasm.simd = true;
 
   const engine = await loadEngine(opt.engine);
-  const useMultilang = opt.multilang || hasLangTags(engine, opt.text);
-
-  if (useMultilang) {
-    for (const [lang, path] of [
-      ["ZH", opt.zhBert],
-      ["JP", opt.jpBert],
-      ["EN", opt.deberta],
-    ] as const) {
-      if (!(await Bun.file(path).exists())) {
-        throw new Error(`${lang} BERT ONNX not found: ${path}`);
-      }
-    }
-  } else {
-    if (opt.lang === "JP" && !(await Bun.file(opt.jpBert).exists())) {
+  const tagged = hasLangTags(engine, opt.text);
+  if (tagged) {
+    const filtered = filterTaggedText(opt.text, enabled);
+    if (!filtered.text) {
       throw new Error(
-        `JP deberta-v2-japanese-char ONNX not found: ${opt.jpBert}. Expected models/deberta_v2_large_japanese_char_wwm_hs.int8.onnx`,
+        `no supported language segments (allow-list: ${opt.langs.join(",")})`,
       );
     }
-    if (opt.lang === "ZH" && !(await Bun.file(opt.zhBert).exists())) {
-      throw new Error(
-        `ZH chinese-roberta ONNX not found: ${opt.zhBert}. Expected models/chinese_roberta_wwm_ext_large_hs.int8.onnx`,
-      );
-    }
+    opt.text = filtered.text;
+  } else if (!enabled.has(opt.lang)) {
+    throw new Error(`untagged --lang ${opt.lang} is not in allow-list ${opt.langs.join(",")}`);
   }
 
-  let prep: Prepared;
+  const useMultilang = opt.multilang || hasLangTags(engine, opt.text);
+  const berts = createBertLoader(opt, enabled);
+
   let packed: ReturnType<typeof packBert>;
   let phones: Int32Array;
   let tones: Int32Array;
   let language: Int32Array;
 
-  if (useMultilang) {
-    const ml = await inferMultilang(opt, engine);
-    phones = ml.phones;
-    tones = ml.tones;
-    language = ml.language;
-    packed = ml.packed;
-  } else {
-    prep = prepare(engine, opt.text, opt.lang);
-    const hData = await runBertHidden(opt, prep, opt.lang);
-    packed = packBert(
-      engine,
-      hData,
-      prep.inputIds.length,
-      prep.word2ph,
-      opt.bertDim,
-      opt.emoDim,
-      opt.seed,
-      opt.sdpNoiseScale,
-      prep.bertLang,
-    );
-    phones = prep.phones;
-    tones = prep.tones;
-    language = prep.language;
+  try {
+    if (useMultilang) {
+      const ml = await inferMultilang(opt, engine, berts);
+      phones = ml.phones;
+      tones = ml.tones;
+      language = ml.language;
+      packed = ml.packed;
+    } else {
+      const prep = prepare(engine, opt.text, opt.lang);
+      const hData = await runBertHidden(opt, prep, opt.lang, berts);
+      packed = packBert(
+        engine,
+        hData,
+        prep.inputIds.length,
+        prep.word2ph,
+        opt.bertDim,
+        opt.emoDim,
+        opt.seed,
+        opt.sdpNoiseScale,
+        prep.bertLang,
+      );
+      phones = prep.phones;
+      tones = prep.tones;
+      language = prep.language;
+    }
+
+    const evil = await ort.InferenceSession.create(await Bun.file(opt.evil).arrayBuffer(), {
+      executionProviders: ["wasm"],
+    });
+    try {
+      const T = packed.nPhone;
+      const D = packed.bertDim;
+      const feeds: Record<string, ort.Tensor> = {
+        x: new ort.Tensor("int64", asI64(phones), [1, T]),
+        t: new ort.Tensor("int64", asI64(tones), [1, T]),
+        language: new ort.Tensor("int64", asI64(language), [1, T]),
+        bert_0: new ort.Tensor("float32", packed.zh, [T, D]),
+        bert_1: new ort.Tensor("float32", packed.ja, [T, D]),
+        bert_2: new ort.Tensor("float32", packed.en, [T, D]),
+        emo: new ort.Tensor("float32", packed.emo, [packed.emoDim, 1]),
+        sid: new ort.Tensor("int64", BigInt64Array.from([BigInt(opt.sid)]), [1]),
+        zin: new ort.Tensor("float32", packed.zin, [1, 2, T]),
+        length_scale: new ort.Tensor("float32", Float32Array.from([opt.lengthScale]), []),
+        sdp_ratio: new ort.Tensor("float32", Float32Array.from([opt.sdpRatio]), []),
+        noise_scale: new ort.Tensor("float32", Float32Array.from([opt.noiseScale]), []),
+      };
+
+      const audioOut = await evil.run(feeds);
+      const outName = opt.evilOutput ?? "o";
+      const o = audioOut[outName] ?? Object.values(audioOut)[0];
+      if (!o) throw new Error("no acoustic output");
+      const wav = o.data as Float32Array;
+      await writeWav(opt.out, wav, SAMPLE_RATE);
+      return { path: opt.out, samples: wav.length, sampleRate: SAMPLE_RATE, multilang: useMultilang };
+    } finally {
+      await evil.release();
+    }
+  } finally {
+    await berts.release();
   }
-
-  const evil = await ort.InferenceSession.create(await Bun.file(opt.evil).arrayBuffer(), {
-    executionProviders: ["wasm"],
-  });
-  const T = packed.nPhone;
-  const D = packed.bertDim;
-  const feeds: Record<string, ort.Tensor> = {
-    x: new ort.Tensor("int64", asI64(phones), [1, T]),
-    t: new ort.Tensor("int64", asI64(tones), [1, T]),
-    language: new ort.Tensor("int64", asI64(language), [1, T]),
-    bert_0: new ort.Tensor("float32", packed.zh, [T, D]),
-    bert_1: new ort.Tensor("float32", packed.ja, [T, D]),
-    bert_2: new ort.Tensor("float32", packed.en, [T, D]),
-    emo: new ort.Tensor("float32", packed.emo, [packed.emoDim, 1]),
-    sid: new ort.Tensor("int64", BigInt64Array.from([BigInt(opt.sid)]), [1]),
-    zin: new ort.Tensor("float32", packed.zin, [1, 2, T]),
-    length_scale: new ort.Tensor("float32", Float32Array.from([opt.lengthScale]), []),
-    sdp_ratio: new ort.Tensor("float32", Float32Array.from([opt.sdpRatio]), []),
-    noise_scale: new ort.Tensor("float32", Float32Array.from([opt.noiseScale]), []),
-  };
-
-  const audioOut = await evil.run(feeds);
-  const outName = opt.evilOutput ?? "o";
-  const o = audioOut[outName] ?? Object.values(audioOut)[0];
-  if (!o) throw new Error("no acoustic output");
-  const wav = o.data as Float32Array;
-  await writeWav(opt.out, wav, SAMPLE_RATE);
-  return { path: opt.out, samples: wav.length, sampleRate: SAMPLE_RATE, multilang: useMultilang };
 }
-
 async function main() {
   const opt = parseArgs(process.argv.slice(2));
   const r = await infer(opt);
@@ -784,6 +850,7 @@ async function main() {
         samples: r.samples,
         sampleRate: r.sampleRate,
         lang: opt.lang,
+        langs: opt.langs,
         multilang: r.multilang,
         evil: opt.evil,
         deberta: opt.deberta,

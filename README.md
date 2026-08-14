@@ -7,12 +7,13 @@ Standalone Bert-VITS2 V220-style TTS frontend (Rust → WASM) + Bun/ORT inferenc
 ```
 engine/          Rust WASM frontend (normalize, EN/ZH/JP G2P, SPM, vocab, bert pack)
 models/
-  evil_v220.onnx                              # acoustic (evil, 44.1 kHz)
-  deberta_v3_large_hs.int8.onnx               # EN BERT → bert_2
-  chinese_roberta_wwm_ext_large_hs.int8.onnx  # ZH BERT → bert_0
-  deberta_v2_large_japanese_char_wwm_hs.int8.onnx  # JP BERT → bert_1
+  evil_v220.onnx
+  deberta_v3_large_hs.int8.onnx / .fp16.onnx               # EN BERT → bert_2
+  chinese_roberta_wwm_ext_large_hs.int8.onnx / .fp16.onnx  # ZH BERT → bert_0
+  deberta_v2_large_japanese_char_wwm_hs.int8.onnx / .fp16.onnx  # JP BERT → bert_1
 infer.ts         Bun CLI: engine.wasm + onnxruntime-web/wasm
-scripts/         ONNX export helpers (JP BERT)
+web/             React UI: same pipeline, onnxruntime-web WebGPU only
+scripts/         ONNX export helpers (JP BERT, FP16 conversion)
 examples/        sample WAVs
 ```
 
@@ -35,7 +36,34 @@ bun infer.ts --lang ZH --text "你好，我是助手。" --out examples/zh.wav
 
 # Japanese (deberta-v2-japanese-char int8 → bert_1)
 bun infer.ts --lang JP --text "こんにちは、世界！" --out examples/jp.wav
+
+# Restrict BERTs: only load ZH+EN; JP-tagged text is skipped
+bun infer.ts --lang zh,en --text "[ZH]你好[EN]hello[JP]こんにちは" --out examples/zh-en.wav
+
+# FP16 BERT (acoustic is always evil_v220.onnx)
+bun infer.ts --fp16 --lang EN --text "Hello, I am evil." --out examples/en-fp16.wav
 ```
+
+## Web (React + WebGPU)
+
+Browser demo of the same pipeline as `infer.ts`. ONNX Runtime uses the **WebGPU** execution provider only (no WASM EP fallback). Chrome / Edge 113+ with WebGPU.
+
+```bash
+cd web
+bun install
+bun run dev
+```
+
+From the repo root: `bun run web`
+
+Open the printed localhost URL. The Vite server streams `models/` and `engine/engine.wasm` from the repo.
+
+- Switch **int8** / **fp16** (reloads BERT; acoustic is always `evil_v220.onnx`)
+- Switch **zh** / **jp** / **en** (loads that language’s BERT)
+- Text in → synthesize → waveform, playback, WAV download, per-stage latency
+- Fetch + WebGPU compile progress per file (ORT wasm, engine, acoustic, BERT)
+
+First load is large (engine ~94MB + acoustic ~197MB + one BERT ~287–781MB).
 
 ## Rebuild frontend WASM
 
