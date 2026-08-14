@@ -53,7 +53,7 @@ cd engine && ./build.sh
 | Lang | G2P | BERT features | Status |
 |------|-----|---------------|--------|
 | EN   | CMUdict + SPM | `deberta_v3_large_hs.int8.onnx` → `bert_2` | working |
-| ZH   | opencpop + `pinyin` (no jieba ToneSandhi) | `chinese_roberta_wwm_ext_large_hs.int8.onnx` → `bert_0` | working |
+| ZH   | jieba POS + ToneSandhi + cn2an + opencpop | `chinese_roberta_wwm_ext_large_hs.int8.onnx` → `bert_0` | working |
 | JP   | jpreprocess + NAIST-JDIC (OpenJTalk-compatible labels) | `deberta_v2_large_japanese_char_wwm_hs.int8.onnx` → `bert_1` | working |
 
 ### ZH notes
@@ -61,7 +61,8 @@ cd engine && ./build.sh
 - BERT checkpoint matches Bert-VITS2: `hfl/chinese-roberta-wwm-ext-large`, ONNX output is `hidden_states[-3]` (1024-d).
 - ZH requires that ONNX the same way EN requires Deberta. Missing the file is an error; there is no zero-BERT fallback.
 - Engine emits real WordPiece `input_ids` via embedded `zh_vocab.txt` (char-level; aligns with `word2ph`).
-- G2P skips jieba POS / ToneSandhi from upstream Python — pronunciation can differ slightly on sandhi cases.
+- G2P mirrors upstream V220 `chinese.py`: jieba POS segmentation, ToneSandhi, cn2an-style number reading (`chinese-number`), embedded pypinyin initials/finals map, opencpop phone lookup.
+- Emotion (`emo`) stays zero-filled; no CLAP.
 
 ### JP notes
 

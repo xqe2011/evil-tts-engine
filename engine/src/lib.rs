@@ -6,6 +6,9 @@ pub mod japanese;
 mod cmudict;
 pub mod g2p;
 mod normalize;
+mod jieba_dict;
+mod pinyin_util;
+mod tone_sandhi;
 mod symbols;
 
 use g2p::{prepare, prepare_lang};

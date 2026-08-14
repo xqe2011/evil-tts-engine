@@ -274,11 +274,7 @@ function prepare(engine: EngineExports, text: string, lang: LangCode) {
   o += nPh * 4;
   const word2ph = i32s(view, o, nW2);
   if (phones.length === 0) {
-    throw new Error(
-      lang === "JP"
-        ? "JP G2P unavailable in WASM (OpenJTalk not ported)"
-        : "engine returned empty phones",
-    );
+    throw new Error("engine returned empty phones");
   }
   return { inputIds, phones, tones, language, word2ph, bertLang };
 }

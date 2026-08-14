@@ -188,10 +188,22 @@ pub fn g2p_english(text: &str) -> G2pOut {
                 .chars()
                 .filter(|c| c.is_ascii_alphabetic() || *c == '\'')
                 .collect();
-            if let Some(syls) = ENG_DICT.get(&cleaned.to_ascii_uppercase()) {
+            let key = cleaned.to_ascii_uppercase();
+            if let Some(syls) = ENG_DICT.get(&key) {
                 let (phns, tns) = refine_syllables(syls);
                 phones_w.push(phns.into_iter().map(|p| post_replace_ph(&p)).collect());
                 tones_w.push(tns);
+            } else if key.ends_with("'S") {
+                let stem = key.trim_end_matches("'S");
+                if let Some(syls) = ENG_DICT.get(stem) {
+                    let (phns, tns) = refine_syllables(syls);
+                    phones_w.push(phns.into_iter().map(|p| post_replace_ph(&p)).collect());
+                    tones_w.push(tns);
+                } else {
+                    let (phns, tns) = fallback_phones(word);
+                    phones_w.push(phns.into_iter().map(|p| post_replace_ph(&p)).collect());
+                    tones_w.push(tns);
+                }
             } else {
                 let (phns, tns) = fallback_phones(word);
                 phones_w.push(phns.into_iter().map(|p| post_replace_ph(&p)).collect());

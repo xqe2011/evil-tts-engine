@@ -12,9 +12,14 @@ pub const LANG_ZH: i32 = 0;
 pub const LANG_JP: i32 = 1;
 pub const LANG_EN: i32 = 2;
 
+pub const PUNCTUATION: [&str; 7] = ["!", "?", "…", ",", ".", "'", "-"];
+
+pub fn punctuation() -> &'static [&'static str] {
+    &PUNCTUATION
+}
+
 pub static SYMBOL_TO_ID: Lazy<HashMap<&'static str, i32>> = Lazy::new(|| {
-    let punctuation = ["!", "?", "…", ",", ".", "'", "-"];
-    let pu_symbols: Vec<&str> = punctuation
+    let pu_symbols: Vec<&str> = PUNCTUATION
         .iter()
         .copied()
         .chain(["SP", "UNK"])

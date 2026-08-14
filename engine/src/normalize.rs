@@ -11,6 +11,37 @@ static ORDINAL: Lazy<Regex> = Lazy::new(|| Regex::new(r"[0-9]+(st|nd|rd|th)").un
 static NUMBER: Lazy<Regex> = Lazy::new(|| Regex::new(r"[0-9]+").unwrap());
 static PUNCT_WORD: Lazy<Regex> = Lazy::new(|| Regex::new(r"([,;.\?\!])([\w])").unwrap());
 
+static ABBREVIATIONS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
+    [
+        ("mrs", "misess"),
+        ("mr", "mister"),
+        ("dr", "doctor"),
+        ("st", "saint"),
+        ("co", "company"),
+        ("jr", "junior"),
+        ("maj", "major"),
+        ("gen", "general"),
+        ("drs", "doctors"),
+        ("rev", "reverend"),
+        ("lt", "lieutenant"),
+        ("hon", "honorable"),
+        ("sgt", "sergeant"),
+        ("capt", "captain"),
+        ("esq", "esquire"),
+        ("ltd", "limited"),
+        ("col", "colonel"),
+        ("ft", "fort"),
+    ]
+    .into_iter()
+    .map(|(abbr, word)| {
+        (
+            Regex::new(&format!(r"(?i)\b{}\.", abbr)).unwrap(),
+            word,
+        )
+    })
+    .collect()
+});
+
 const ONES: [&str; 20] = [
     "zero",
     "one",
@@ -129,8 +160,33 @@ fn expand_number(num: u64) -> String {
 fn ordinal_to_words(s: &str) -> String {
     let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
     let n: u64 = digits.parse().unwrap_or(0);
-    // simplistic: "twenty-first" etc. not perfect; enough for rare cases
-    format!("{} {}", number_to_words(n), &s[digits.len()..])
+    let suffix = &s[digits.len()..];
+    let word = match n {
+        1 if suffix == "st" => "first".into(),
+        2 if suffix == "nd" => "second".into(),
+        3 if suffix == "rd" => "third".into(),
+        n => {
+            let cardinal = number_to_words(n);
+            if cardinal.ends_with("ty") {
+                format!("{}ieth", &cardinal[..cardinal.len() - 2])
+            } else if cardinal.ends_with('y') {
+                format!("{}ieth", &cardinal[..cardinal.len() - 1])
+            } else if cardinal.ends_with('t') {
+                format!("{}h", cardinal)
+            } else {
+                format!("{cardinal}th")
+            }
+        }
+    };
+    word
+}
+
+fn expand_abbreviations(text: &str) -> String {
+    let mut out = text.to_string();
+    for (re, word) in ABBREVIATIONS.iter() {
+        out = re.replace_all(&out, *word).into_owned();
+    }
+    out
 }
 
 fn replace_punctuation(text: &str) -> String {
@@ -178,7 +234,8 @@ fn normalize_numbers(text: &str) -> String {
 }
 
 pub fn text_normalize(text: &str) -> String {
-    let text = normalize_numbers(text);
+    let text = expand_abbreviations(text);
+    let text = normalize_numbers(&text);
     let text = replace_punctuation(&text);
     PUNCT_WORD.replace_all(&text, "$1 $2").into_owned()
 }
