@@ -1,13 +1,18 @@
-# chinese-roberta-wwm-ext-large (tokenizer only)
+# chinese-roberta-wwm-ext-large (ZH BERT)
 
-Tokenizer / config copied for a future ZH BERT ONNX export.
+Source: [`hfl/chinese-roberta-wwm-ext-large`](https://huggingface.co/hfl/chinese-roberta-wwm-ext-large) (Bert-VITS2 `bert_models.json` / V220 `chinese_bert.py`).
 
-**No `pytorch_model.bin` / ONNX shipped** — weights were not available in the upstream bert checkout used to build this repo.
+Shipped ONNX exports **hidden_states[-3]** (dim 1024), same slice as upstream Python:
 
-When you have an ONNX with a `hidden` (or `last_hidden_state`) output of shape `[1, seq, 1024]`, place it here as e.g. `chinese_roberta_wwm_ext_large.onnx` and run:
+| File | Notes |
+|------|--------|
+| `chinese_roberta_wwm_ext_large_hs.int8.onnx` | Dynamic int8 (~287MB). Prefer this for ORT wasm. |
+| `vocab.txt` + tokenizer JSON | WordPiece; engine embeds `zh_vocab.txt` for char-level ids. |
 
 ```bash
-bun infer.ts --lang ZH --zh-bert models/zh-bert/chinese_roberta_wwm_ext_large.onnx --text "你好" --out examples/zh.wav
+bun infer.ts --lang ZH --text "你好，我是助手。" --out examples/zh.wav
+# or override:
+bun infer.ts --lang ZH --zh-bert models/zh-bert/chinese_roberta_wwm_ext_large_hs.int8.onnx ...
 ```
 
-Note: current WASM ZH path emits placeholder `input_ids` (zeros) sized to `chars+2`. A full WordPiece encode step is still required before real ZH BERT features work.
+FP32 ONNX (~1.2GB) is not shipped (same policy as EN Deberta).

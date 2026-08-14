@@ -9,6 +9,7 @@ use crate::symbols::{
 use once_cell::sync::Lazy;
 use regex::Regex;
 use sentencepiece_rs::SentencePieceProcessor;
+use std::collections::HashMap;
 
 const SPM_BYTES: &[u8] = include_bytes!("../assets/spm.model");
 
@@ -121,11 +122,42 @@ pub fn encode_bert_ids(text: &str) -> Vec<i32> {
     out
 }
 
-/// Character-level ids for ZH when chinese-roberta ONNX is unavailable:
-/// placeholder length = chars + 2 (CLS/SEP), filled with zeros by host.
-pub fn encode_zh_char_slots(norm: &str) -> Vec<i32> {
-    let n = norm.chars().count() + 2;
-    vec![0i32; n]
+/// chinese-roberta-wwm-ext-large WordPiece ids (char-level for CJK).
+/// Matches HuggingFace BertTokenizer on normalized ZH text: [CLS] + chars + [SEP].
+const ZH_VOCAB_TXT: &str = include_str!("../assets/zh_vocab.txt");
+const ZH_CLS: i32 = 101;
+const ZH_SEP: i32 = 102;
+const ZH_UNK: i32 = 100;
+
+static ZH_VOCAB: Lazy<HashMap<String, i32>> = Lazy::new(|| {
+    let mut m = HashMap::new();
+    for (i, line) in ZH_VOCAB_TXT.lines().enumerate() {
+        m.insert(line.to_string(), i as i32);
+    }
+    m
+});
+
+pub fn encode_zh_bert_ids(norm: &str) -> Vec<i32> {
+    let mut out = Vec::with_capacity(norm.chars().count() + 2);
+    out.push(ZH_CLS);
+    for ch in norm.chars() {
+        let s = ch.to_string();
+        let id = ZH_VOCAB
+            .get(&s)
+            .or_else(|| {
+                let lower = s.to_lowercase();
+                if lower != s {
+                    ZH_VOCAB.get(&lower)
+                } else {
+                    None
+                }
+            })
+            .copied()
+            .unwrap_or(ZH_UNK);
+        out.push(id);
+    }
+    out.push(ZH_SEP);
+    out
 }
 
 pub struct G2pOut {
@@ -239,7 +271,7 @@ pub fn prepare_lang(text: &str, lang: i32) -> Prepared {
     match lang {
         LANG_ZH => {
             let g = chinese::g2p_chinese(text);
-            let input_ids = encode_zh_char_slots(&g.norm_text);
+            let input_ids = encode_zh_bert_ids(&g.norm_text);
             let (phones, tones, language) =
                 cleaned_text_to_sequence(&g.phones, &g.tones, LANG_ZH);
             let phones = intersperse(&phones, 0);
